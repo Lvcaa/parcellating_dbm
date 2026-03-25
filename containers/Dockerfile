@@ -9,5 +9,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy the rest of the project
 COPY . .
 
-# Default: run the script
-CMD ["python", "fake_matrix_irbio.py"]
+# Default: run the benchmark script from the reorganized scripts folder
+CMD ["python", "scripts/benchmarks/fake_matrix_stress_test.py"]

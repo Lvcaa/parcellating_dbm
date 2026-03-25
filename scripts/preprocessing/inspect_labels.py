@@ -1,8 +1,13 @@
+from pathlib import Path
+
 import nibabel as nib
 import numpy as np
 
-img = nib.load("MNI152_T1_1mm_seg.nii.gz")
-data = img.get_fdata()
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+REFERENCE_DIR = PROJECT_ROOT / "data" / "reference"
+SEGMENTATION_PATH = REFERENCE_DIR / "MNI152_T1_1mm_seg.nii.gz"
+MASK_PATH = REFERENCE_DIR / "MNI152_keep_labels_mask.nii.gz"
 
 label_dict = {
     0: "Background",
@@ -40,24 +45,32 @@ label_dict = {
     60: "Right ventral DC"
 }
 
-# Count the number of voxels for each label
-labels, counts = np.unique(data, return_counts=True)
-
 # Keep labels that are not white matter
 # Labels reference: https://surfer.nmr.mgh.harvard.edu/fswiki/SynthSeg
-keep_labels = [3, 8, 10, 11, 12, 13, 16, 17, 18, 26, 28,
-               42, 47, 49, 50, 51, 52, 53, 54, 58, 60]
+keep_labels = [
+    3, 8, 10, 11, 12, 13, 16, 17, 18, 26, 28,
+    42, 47, 49, 50, 51, 52, 53, 54, 58, 60,
+]
 
-# Print labels and counts for labels to keep
-for label in keep_labels:
-    count = counts[labels == label][0]
-    print(f"Label {label} ({label_dict[label]}): {count} voxels")
 
-# Mask gray-matter only
-mask = np.isin(data, keep_labels).astype(np.uint8)
-print("Mask created", mask.shape, mask.sum())
+def main():
+    img = nib.load(str(SEGMENTATION_PATH))
+    data = img.get_fdata()
 
-# Save mask
-print("Saving mask to MNI152_keep_labels_mask.nii.gz")
-out = nib.Nifti1Image(mask, img.affine, img.header)
-nib.save(out, "MNI152_keep_labels_mask.nii.gz")
+    labels, counts = np.unique(data, return_counts=True)
+    label_counts = dict(zip(labels.astype(int), counts.astype(int)))
+
+    for label in keep_labels:
+        count = label_counts.get(label, 0)
+        print(f"Label {label} ({label_dict[label]}): {count} voxels")
+
+    mask = np.isin(data, keep_labels).astype(np.uint8)
+    print("Mask created", mask.shape, int(mask.sum()))
+
+    print(f"Saving mask to {MASK_PATH}")
+    out = nib.Nifti1Image(mask, img.affine, img.header)
+    nib.save(out, str(MASK_PATH))
+
+
+if __name__ == "__main__":
+    main()

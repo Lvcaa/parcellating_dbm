@@ -1,4 +1,5 @@
-ROIs/
-
-parcellating_dbm.def
+__pycache__/
+*.pyc
+outputs/
+containers/parcellating_dbm.def
 parcellation-test.tar
