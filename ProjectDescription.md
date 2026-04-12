@@ -52,58 +52,129 @@ Typical scale:
 
 ---
 
-## 4. Parcel-Level Feature Construction (Key Optimization Step)
+## 4. Parcel-Level Feature Construction (Node Features)
 
-Instead of using full voxel distributions or full connectivity rows:
+Instead of reducing each parcel to a single summary statistic such as the mean,
+we represent each parcel by the **distribution of Jacobian determinant values**
+measured across all voxels in that parcel.
 
-For each parcel compute **compact morphometric descriptors**:
+### Node definition:
 
-- Mean deformation
-- Standard deviation
-- Median
-- Quantiles (e.g. 25%, 75%)
-- Skewness / distribution shape
-- Optional: local variability metrics
+For each parcel:
+
+1. Extract all voxel-wise Jacobian determinant values from the nonlinear warp
+2. Build a normalized histogram or probability density estimate
+3. Represent the parcel as a probability distribution **P(x)**
 
 👉 Result:
-- Each parcel becomes a **low-dimensional feature vector (≈5–20 features)**
+- Each parcel is described by its **full morphometric profile**, not just by one number
 
 🎯 Purpose:
-- Massive reduction in computational cost
-- Avoids constructing large dense matrices
+- Preserve the **shape** of the deformation pattern
+- Distinguish uniform abnormalities from heterogeneous or patchy abnormalities
+- Retain richer information for downstream network construction
 
 ---
 
-## 5. Graph Construction (Sparse Representation)
+## 5. Graph Construction (JSD-Based Morphometric Connectivity)
 
 ### Goal:
-Model **dependencies between parcels** without building a dense matrix
+Build a graph where parcels are connected when they show **similar deformation
+profiles** and are both **strongly abnormal**.
 
-### Steps:
+### Step 1: Distribution similarity
 
-1. Compute similarity between parcel feature vectors:
-   - correlation
-   - cosine similarity
+For each pair of parcels A and B, compute the **Jensen-Shannon divergence (JSD)**
+between their Jacobian distributions:
 
-2. Apply **sparsification strategy**:
-   - keep only **top-k neighbors per parcel**, OR
-   - threshold weak similarities
+$$
+\mathrm{JSD}(P_A, P_B)
+$$
+
+The JSD is preferred over correlation here because we are comparing **entire
+probability distributions**, not paired voxel samples. It measures how different
+two morphometric profiles are in information-theoretic terms.
+
+Convert this divergence into a similarity term:
+
+$$
+S_{AB} = 1 - \mathrm{JSD}(P_A, P_B)
+$$
+
+So:
+- if two parcels have nearly identical deformation distributions, similarity is close to 1
+- if their morphometric profiles differ strongly, similarity approaches 0
+
+### Step 2: Anomaly weighting
+
+To emphasize parcels that are not only similar, but also truly abnormal, weight
+each edge by the intensity of anomaly in both parcels:
+
+$$
+W_{AB}^{\mathrm{anom}} = |J_A - 1| \times |J_B - 1|
+$$
+
+where:
+- $J_A$ = representative central Jacobian value for parcel A
+- $J_B$ = representative central Jacobian value for parcel B
+
+This term increases the weight of edges linking parcels whose deformation
+magnitudes are both far from the healthy reference value of 1.0.
+
+### Step 3: Final edge weight
+
+The final morphometric edge weight is:
+
+$$
+W_{AB} = (1 - \mathrm{JSD}(P_A, P_B)) \times |J_A - 1| \times |J_B - 1|
+$$
 
 👉 Result:
-- **Sparse weighted graph**
-
-Where:
 - Nodes = parcels
-- Edges = strongest morphometric similarities only
+- Edge weights = similarity of Jacobian distributions, amplified by anomaly intensity
 
-⚠️ Critical:
-- Avoid full N × N dense matrix (infeasible at large N)
+This produces a graph that highlights parcels that are both:
+- morphometrically similar
+- meaningfully abnormal
 
 ---
 
-## 6. Network Analysis (Main Method)
+## 6. Adaptive Sparsification and Community Detection
 
-Apply **Leiden community detection** on the sparse graph.
+### Adaptive sparsification
+
+The pairwise weight matrix is initially dense. To suppress weak background
+connections and retain only subject-specific abnormal structure, apply an
+adaptive threshold:
+
+$$
+\mathrm{Threshold} = \mu_{\mathrm{global}} + \sigma_{\mathrm{global}}
+$$
+
+where $\mu_{\mathrm{global}}$ and $\sigma_{\mathrm{global}}$ are computed from the
+full distribution of edge weights for that subject.
+
+Keep only edges satisfying:
+
+$$
+W_{AB} > \mu_{\mathrm{global}} + \sigma_{\mathrm{global}}
+$$
+
+👉 Result:
+- weak and noisy connections are removed
+- the dense matrix becomes a **sparse weighted graph**
+- retained edges represent stronger-than-background abnormal similarity
+
+
+# Potential Issues
+- A distribution loses within-parcel spatial layout. Two parcels can have the same histogram but different spatial organization of abnormal voxels.
+
+- All-to-all JSD is still an O(N^2) step, so this is biologically cleaner than correlation but not automatically cheaper computationally.
+
+- The mu + sigma threshold is reasonable as a first heuristic, but it may create very different graph densities across subjects. That could affect comparability and Leiden stability.
+### Community detection
+
+Apply **Leiden community detection** on the resulting sparse weighted graph.
 
 ### Output:
 - Groups of parcels with **coordinated deformation patterns**
@@ -114,6 +185,68 @@ Apply **Leiden community detection** on the sparse graph.
 
 👉 This is the main biologically meaningful result
 
+### Limitations and safeguards
+
+To make the method more robust and scalable, we explicitly include the
+following safeguards:
+
+#### A. Preserve some within-parcel spatial structure
+
+A histogram alone does not encode where abnormal voxels are located inside the
+parcel. Two parcels may have similar Jacobian distributions but different
+spatial organization.
+
+Mitigation:
+- augment each parcel representation with a small set of spatial descriptors
+- examples: centroid of abnormal voxels, spatial variance, compactness, or a
+  simple fragmentation score
+- optional extension: build a small number of sub-histograms within coarse
+  parcel subzones rather than using one global histogram only
+
+This keeps the distribution-based idea while reducing the risk of treating
+spatially distinct abnormalities as equivalent.
+
+#### B. Avoid full all-to-all JSD when possible
+
+Exact pairwise JSD over all parcels scales as $O(N^2)$, which can become
+costly at high resolution.
+
+Mitigation:
+- use a two-stage graph construction strategy
+- first, compute a cheap coarse similarity on lightweight features
+- then, for each parcel, retain only a candidate neighborhood of likely matches
+- compute exact JSD only within that reduced candidate set
+
+Candidate screening may use:
+- coarse histogram embeddings
+- median or mean Jacobian similarity
+- anomaly magnitude similarity
+- optional anatomical neighborhood constraints
+
+This preserves the biologically meaningful JSD comparison while avoiding
+unnecessary pairwise evaluations.
+
+#### C. Stabilize sparsification across subjects
+
+The threshold $\mu_{\mathrm{global}} + \sigma_{\mathrm{global}}$ is a useful
+subject-adaptive heuristic, but it may yield different graph densities across
+subjects, which can affect comparability and Leiden stability.
+
+Mitigation:
+- treat $\mu + \sigma$ as an exploratory threshold, not the only one
+- compare it against fixed-density strategies such as top-$k$ neighbors per
+  parcel or a fixed percentile threshold
+- report resulting graph density per subject as a quality-control variable
+- prefer density-matched graphs for cross-subject comparisons and statistical
+  analyses
+
+Recommended practical strategy:
+- exploratory analysis: adaptive threshold $\mu + \sigma$
+- primary analysis: fixed top-$k$ or fixed percentile sparsification
+
+This balances sensitivity to subject-specific signal with reproducibility across
+the cohort.
+
 ---
 
 # 🧪 Feasibility Study (Revised)
@@ -123,20 +256,20 @@ Evaluate computational feasibility on **IRBIO cluster (CPU + RAM)**
 
 ---
 
-## Step 1: Synthetic Graph Benchmark (Sparse, Not Dense)
+## Step 1: Distribution-Based Graph Benchmark
 
-Instead of dense 90k × 90k matrix:
+Benchmark the proposed method with synthetic parcel distributions:
 
-- Generate **sparse graphs** with:
-  - Nodes: 10k → 50k → 90k (progressively)
-  - Degree: fixed (e.g. k = 20–100)
-  - Weighted edges (random)
-
-👉 Mimics real sparsified morphometric graph
+- Nodes: 10k → 50k → 90k (progressively)
+- Each node stores a histogram or probability vector
+- Pairwise similarity computed via JSD
+- Edge weights modulated by anomaly magnitude
+- Adaptive thresholding applied per synthetic subject
 
 Measure:
 - Memory usage
-- Runtime of graph construction
+- Runtime of pairwise JSD computation
+- Runtime of sparsification
 - Runtime of Leiden
 
 ---
@@ -159,12 +292,13 @@ Measure:
 
 ---
 
-## Step 3: Feature Extraction Cost
+## Step 3: Distribution Extraction Cost
 
 Evaluate cost of:
 
-- computing parcel-level morphometric summaries
-- aggregating voxel data → parcel descriptors
+- extracting voxel-wise Jacobian determinants per parcel
+- building parcel histograms / density estimates
+- computing anomaly summary values per parcel
 
 ⚠️ Expected:
 - relatively cheap (linear in voxel count)
@@ -233,7 +367,7 @@ Purpose:
 
 ## C. Main Pipeline (Target Method)
 
-- Sparse graph + Leiden
+- JSD-weighted anomaly graph + Leiden
 
 Purpose:
 - capture **network-level morphometric organization**
@@ -242,12 +376,12 @@ Purpose:
 
 # 🚫 What to Avoid
 
-- Full dense adjacency matrices (N × N)
-- Full row-by-row correlation matrices
-- Clustering raw adjacency rows (too high dimensional)
+- Reducing each parcel to the mean Jacobian only
+- Using correlation when the object of comparison is a full probability distribution
+- Keeping dense all-to-all graphs without sparsification
 - Gradient-based / deep learning approaches (for now)
 
-👉 These approaches are computationally prohibitive in the feasibility phase
+👉 These choices would either discard too much morphometric information or create unnecessary computational burden
 
 ---
 
@@ -284,18 +418,18 @@ For each pipeline:
 
 ### Core idea:
 
-> Compress voxel-level deformation into parcel-level features, construct a sparse similarity graph, and apply Leiden community detection.
+> Represent each parcel by the distribution of Jacobian determinants from the warp, compare parcels with Jensen-Shannon divergence, weight similarities by anomaly intensity, sparsify adaptively, and apply Leiden community detection.
 
 ---
 
 ### Pipeline hierarchy:
 
-1. **Mini-batch K-means (features)** → fastest baseline  
-2. **Mini-batch K-means (reduced profiles)** → intermediate  
-3. **Sparse graph + Leiden** → main method  
+1. **Mini-batch K-means (simple parcel summaries)** → fastest baseline  
+2. **Mini-batch K-means (distribution-derived features)** → intermediate  
+3. **JSD-weighted anomaly graph + Leiden** → main method  
 
 ---
 
 ### Key feasibility principle:
 
-> Avoid dense all-to-all computations. Use compact representations and sparse structures.
+> Preserve the full parcel-level deformation profile where it matters, but enforce sparsity after weighting so the resulting graph remains biologically focused and computationally manageable.
