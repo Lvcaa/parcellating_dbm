@@ -1,0 +1,13 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    . /app
+
+%post
+    cd /app
+    pip install --no-cache-dir -r requirements.txt
+
+%runscript
+    cd /app
+    exec python scripts/benchmarks/fake_matrix_stress_test.py "$@"

@@ -1,0 +1,41 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    . /app
+
+%post
+    apt-get update
+    apt-get install -y --no-install-recommends gcc g++
+    rm -rf /var/lib/apt/lists/*
+
+    cd /app
+    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir nibabel scikit-learn
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export APP_ROOT=/app
+    export DEFAULT_SEGMENTATION=/app/data/reference/MNI152_T1_1mm_seg.nii.gz
+
+%runscript
+    set -eu
+
+    export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-64}"
+
+    workdir="${PWD:-/app}"
+    output_root="${SUB_PARCELS_OUTPUT_ROOT:-${workdir}/outputs/rois}"
+    mkdir -p "${output_root}"
+
+    if [ -n "${SUB_PARCELS_SEGMENTATION:-}" ]; then
+        segmentation="${SUB_PARCELS_SEGMENTATION}"
+    elif [ -f "${workdir}/MNI152_T1_1mm_seg.nii.gz" ]; then
+        segmentation="${workdir}/MNI152_T1_1mm_seg.nii.gz"
+    else
+        segmentation="${DEFAULT_SEGMENTATION}"
+    fi
+
+    exec python /app/scripts/parcellation/sub_parcels_equal_size.py \
+        --segmentation "${segmentation}" \
+        --output-root "${output_root}" \
+        "$@"

@@ -1,0 +1,12 @@
+Bootstrap: docker
+From: python:3.11-slim
+
+%files
+    . /app
+
+%post
+    cd /app
+    pip install --no-cache-dir numpy nibabel
+
+%runscript
+    exec python /app/scripts/parcellation/aggregate_parcels.py "$@"
