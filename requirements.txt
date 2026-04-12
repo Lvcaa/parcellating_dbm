@@ -2,3 +2,4 @@ numpy
 networkx
 python-igraph
 leidenalg
+scipy

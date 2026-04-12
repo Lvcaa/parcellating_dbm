@@ -48,8 +48,8 @@ label_dict = {
 # Keep labels that are not white matter
 # Labels reference: https://surfer.nmr.mgh.harvard.edu/fswiki/SynthSeg
 keep_labels = [
-    3, 8, 10, 11, 12, 13, 16, 17, 18, 26, 28,
-    42, 47, 49, 50, 51, 52, 53, 54, 58, 60,
+    3, 4, 5, 8, 10, 11, 12, 13, 16, 17, 18, 24, 26, 28,
+    42, 43, 44, 47, 49, 50, 51, 52, 53, 54, 58, 60,
 ]
 
 
@@ -60,12 +60,27 @@ def main():
     labels, counts = np.unique(data, return_counts=True)
     label_counts = dict(zip(labels.astype(int), counts.astype(int)))
 
+    # Compute the GCD across the non-zero voxel counts for the labels we keep.
+    counts_to_consider = [label_counts.get(label, 0) for label in keep_labels]
+    non_zero_counts = [count for count in counts_to_consider if count > 0]
+    missing_labels = [label for label, count in zip(keep_labels, counts_to_consider) if count == 0]
+
+    gcd = int(np.gcd.reduce(np.asarray(non_zero_counts, dtype=np.int64))) if non_zero_counts else 0
+
+    print(f"Greatest common divisor of counts for labels to keep: {gcd}")
+    if missing_labels:
+        print(f"Labels not present in the segmentation: {missing_labels}")
+
     for label in keep_labels:
         count = label_counts.get(label, 0)
         print(f"Label {label} ({label_dict[label]}): {count} voxels")
 
     mask = np.isin(data, keep_labels).astype(np.uint8)
-    print("Mask created", mask.shape, int(mask.sum()))
+    total_voxels = int(data.size)
+    kept_voxels = int(mask.sum())
+    print(f"Total voxels in the segmentation: {total_voxels}")
+    print(f"Voxels kept by the mask: {kept_voxels}")
+    print("Mask created", mask.shape, kept_voxels)
 
     print(f"Saving mask to {MASK_PATH}")
     out = nib.Nifti1Image(mask, img.affine, img.header)
