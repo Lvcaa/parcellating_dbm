@@ -16,7 +16,20 @@ from sklearn.neighbors import NearestCentroid
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SEGMENTATION = PROJECT_ROOT / "data" / "reference" / "MNI152_T1_1mm_seg.nii.gz"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "rois"
+""" 
+Script to split a segmentation ROI into approximately equal-sized sub-parcels.
+The script takes a segmentation image and a specified ROI label, and it divides the voxels
+belonging to that ROI into sub-parcels of approximately equal size.
 
+The resulting sub-parcels are saved as separate NIfTI images in an output directory.
+The script uses agglomerative clustering with a connectivity graph to ensure that the 
+sub-parcels are spatially contiguous. After clustering, it applies a linear assignment 
+algorithm to assign voxels to the nearest cluster centroids, 
+ensuring that each sub-parcel has approximately the desired number of voxels. 
+
+The script also includes an optional local connectivity diagnostic to check 
+if any voxels in the sub-parcels are not directly neighboring other voxels in the same sub-parcel.
+"""
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -55,11 +68,15 @@ def parse_args():
 
 
 def write_nifti(roi_indices, sub_roi_index, template_img, output_dir):
+
+    # Create an empty image and set the voxels corresponding to the current sub-parcel to 1
     empty_image = np.zeros(template_img.shape, dtype=np.uint8)
 
+    # roi_indices is in (x, y, z) format, so we can directly index into the empty image
     for ii in roi_indices:
         empty_image[ii[0], ii[1], ii[2]] = 1
 
+    # Create a NIfTI image and save it
     nii_ = nib.Nifti1Image(empty_image, affine=template_img.affine, header=template_img.header)
     output_path = output_dir / f"roi_{sub_roi_index:04d}.nii.gz"
     nii_.to_filename(str(output_path))
@@ -80,16 +97,30 @@ def main():
     if args.parcel_size < 1:
         raise ValueError("--parcel-size must be at least 1")
 
+    # Load the segmentation image and extract the coordinates of the voxels 
+    # belonging to the specified ROI label
     template_img = nib.load(str(args.segmentation))
+    
+    # Get the segmentation data as a numpy array
     seg_image = template_img.get_fdata()
 
+    # Extract the coordinates of the voxels that belong to the specified ROI label
     roi_coord = np.vstack(np.where(seg_image == args.roi_label)).T
     if roi_coord.size == 0:
         raise ValueError(f"ROI label {args.roi_label} not found in {args.segmentation}")
 
+    # Calculate the number of clusters needed to achieve the desired parcel size
     n_clust = int(np.ceil(len(roi_coord) / args.parcel_size))
 
+    # Create a connectivity graph for the voxels 
+    # in the ROI to ensure that sub-parcels are spatially contiguous
+    
+    # Create a binary mask for the ROI and use it to compute the connectivity graph
     roi_mask = (seg_image == args.roi_label).astype(np.uint8)
+    
+    # The grid_to_graph function creates a sparse matrix 
+    # where each row corresponds to a voxel in the ROI and 
+    # each column corresponds to a neighboring voxel.
     conn = image.grid_to_graph(
         n_x=roi_mask.shape[0],
         n_y=roi_mask.shape[1],
