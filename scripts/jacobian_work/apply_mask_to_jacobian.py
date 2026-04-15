@@ -43,24 +43,6 @@ def compute_histogram(values: np.ndarray, bins: int, hist_min: float, hist_max: 
     return hist
 
 
-def spatial_descriptors(mask_indices: np.ndarray) -> tuple[np.ndarray, float]:
-    """
-    Compute simple spatial descriptors for the given mask indices.
-    A histogram of Jacobian values tells you about the values inside the parcel,
-    but not much about the parcel’s geometry. 
-    These two numbers are cheap little descriptors that give some spatial context
-    """
-    # Compute the centroid of the mask indices
-    centroid = mask_indices.mean(axis=0, dtype=np.float64)
-
-    # Compute the spatial spread as the root mean square distance of the mask indices from the centroid
-    centered = mask_indices - centroid
-
-    # The spatial spread is a measure of how dispersed the mask indices are around the centroid.
-    spatial_spread = float(np.sqrt(np.mean(np.sum(centered ** 2, axis=1))))
-    return centroid, spatial_spread
-
-
 def process_roi_file(
     roi_path: Path,
     rois_dir: str,
@@ -70,11 +52,10 @@ def process_roi_file(
     hist_max: float,
     healthy_baseline: float,
 ) -> tuple[dict, np.ndarray]:
-
-"""
-Process a single ROI file to extract Jacobian features. 
-This function will be called in parallel for each ROI file.
-"""
+    """
+    Process a single ROI file to extract Jacobian features.
+    This function will be called in parallel for each ROI file.
+    """
     jac_img = nib.load(jacobian_path)
     jac_data = jac_img.get_fdata()
 
@@ -91,16 +72,13 @@ This function will be called in parallel for each ROI file.
     # This identifies the voxels that belong to the parcel defined by the ROI.
     mask = roi_img.get_fdata() > 0
 
-    # Get the voxel indices where the mask is True.
-    # This will be used for spatial descriptors and to extract values from the Jacobian data.
-    voxel_indices = np.argwhere(mask)
-    if voxel_indices.size == 0:
+    if not np.any(mask):
         raise ValueError(f"ROI {roi_path} is empty")
 
     # Extract the Jacobian values at the masked voxel locations and convert to float32 for memory efficiency.
     values = jac_data[mask].astype(np.float32, copy=False)
     
-    # Compute summary statistics, histogram, and spatial descriptors for the masked Jacobian values.
+    # Compute summary statistics and histogram for the masked Jacobian values.
 
     # The mean and median provide central tendency measures of the Jacobian values within the parcel
     mean_value = float(np.mean(values))
@@ -113,9 +91,6 @@ This function will be called in parallel for each ROI file.
     # Compute the normalized histogram of Jacobian values within the parcel.
     # Captures the distribution of values, which can provide insights into the parcel deformation characteristics.
     hist = compute_histogram(values, bins=bins, hist_min=hist_min, hist_max=hist_max)
-
-    # Compute spatial descriptors (centroid and spatial spread) for the parcel based on the voxel indices.
-    centroid, spatial_spread = spatial_descriptors(voxel_indices)
 
     relative_roi_path = roi_path.relative_to(Path(rois_dir))
     parent_label = relative_roi_path.parts[0] if len(relative_roi_path.parts) > 1 else ""
@@ -130,10 +105,6 @@ This function will be called in parallel for each ROI file.
         "mean_jacobian": mean_value,
         "median_jacobian": median_value,
         "anomaly_score": anomaly_score,
-        "centroid_x": float(centroid[0]),
-        "centroid_y": float(centroid[1]),
-        "centroid_z": float(centroid[2]),
-        "spatial_spread": spatial_spread,
         "raw_values_key": raw_values_key,
     }
 
@@ -151,7 +122,7 @@ def write_rows_csv(output_csv: Path, rows: list[dict], bins: int) -> None:
     including histogram bins. 
     
     This will create a structured feature table where each row corresponds
-    to a parcel, and columns include summary statistics, spatial descriptors, anomaly score, and 
+    to a parcel, and columns include summary statistics, anomaly score, and
     histogram values.
     """
     
@@ -163,10 +134,6 @@ def write_rows_csv(output_csv: Path, rows: list[dict], bins: int) -> None:
         "mean_jacobian",
         "median_jacobian",
         "anomaly_score",
-        "centroid_x",
-        "centroid_y",
-        "centroid_z",
-        "spatial_spread",
         "raw_values_key",
     ]
 
@@ -306,7 +273,7 @@ def parse_args() -> argparse.Namespace:
             "Extract parcel-level Jacobian features from ROI masks. "
             "For each parcel, save raw voxel values, a normalized histogram, "
             "central Jacobian summaries, anomaly score, voxel count, and "
-            "simple spatial descriptors."
+            "per-parcel distribution features."
         )
     )
     parser.add_argument(
