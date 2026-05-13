@@ -2,21 +2,25 @@ label_number,label_name,roi_id_start,roi_id_end,parcel_count
 3,Left cerebral cortex,0000,23290,23291
 4,Left lateral ventricle,23291,23884,594
 5,Left inferior lateral ventricle,23885,23915,31
-10,Left thalamus,23916,24580,665
-11,Left caudate,24581,24940,360
-12,Left putamen,24941,25446,506
-13,Left pallidum,25447,25589,143
-17,Left hippocampus,25590,25945,356
-18,Left amygdala,25946,26100,155
-26,Left accumbens area,26101,26168,68
-28,Left ventral DC,26169,26568,400
-43,Right lateral ventricle,26569,27139,571
-44,Right inferior lateral ventricle,27140,27174,35
-49,Right thalamus,27175,27866,692
-50,Right caudate,27867,28234,368
-51,Right putamen,28235,28725,491
-52,Right pallidum,28726,28884,159
-53,Right hippocampus,28885,29234,350
-54,Right amygdala,29235,29404,170
-58,Right accumbens area,29405,29475,71
-60,Right ventral DC,29476,29874,399
+8,Left cerebellum cortex,23916,28778,4863
+10,Left thalamus,28779,29443,665
+11,Left caudate,29444,29803,360
+12,Left putamen,29804,30309,506
+13,Left pallidum,30310,30452,143
+16,Brain-stem,30453,32445,1993
+17,Left hippocampus,32446,32801,356
+18,Left amygdala,32802,32956,155
+24,CSF,32957,51896,18940
+26,Left accumbens area,51897,51964,68
+28,Left ventral DC,51965,52364,400
+43,Right lateral ventricle,52365,52935,571
+44,Right inferior lateral ventricle,52936,52970,35
+47,Right cerebellum cortex,52971,57694,4724
+49,Right thalamus,57695,58386,692
+50,Right caudate,58387,58754,368
+51,Right putamen,58755,59245,491
+52,Right pallidum,59246,59404,159
+53,Right hippocampus,59405,59754,350
+54,Right amygdala,59755,59924,170
+58,Right accumbens area,59925,59995,71
+60,Right ventral DC,59996,60394,399

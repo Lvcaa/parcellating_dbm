@@ -76,341 +76,225 @@ For each parcel:
 
 ---
 
-## 5. Graph Construction (JSD-Based Morphometric Connectivity)
+## 5. Edge Definitions (3 Types)
 
 ### Goal:
-Build a graph where parcels are connected when they show **similar deformation
-profiles** and are both **strongly abnormal**.
+Build subject-level parcel graphs using multiple definitions of pairwise
+morphometric similarity so that downstream validation does not depend on a
+single edge metric.
 
-### Step 1: Distribution similarity
+For each pair of parcels A and B, compute edges using:
 
-For each pair of parcels A and B, compute the **Jensen-Shannon divergence (JSD)**
-between their Jacobian distributions:
+1. **Wasserstein distance**
+2. **KL divergence (Gaussian version)**
+3. **Median + IQR**
 
-$$
-\mathrm{JSD}(P_A, P_B)
-$$
+### Edge construction details
 
-The JSD is preferred over correlation here because we are comparing **entire
-probability distributions**, not paired voxel samples. It measures how different
-two morphometric profiles are in information-theoretic terms.
+For each parcel pair:
 
-Convert this divergence into a similarity term:
+- compute **A conditioned on B**
+- compute **B conditioned on A**
 
-$$
-S_{AB} = 1 - \mathrm{JSD}(P_A, P_B)
-$$
+This keeps the pairwise comparison explicitly directional at the feature
+construction stage, even when later graph summaries are compared across
+subjects.
 
-So:
-- if two parcels have nearly identical deformation distributions, similarity is close to 1
-- if their morphometric profiles differ strongly, similarity approaches 0
+### Similarity convention
 
-### Step 2: Anomaly weighting
-
-To emphasize parcels that are not only similar, but also truly abnormal, weight
-each edge by the intensity of anomaly in both parcels:
-
-$$
-W_{AB}^{\mathrm{anom}} = |J_A - 1| \times |J_B - 1|
-$$
-
-where:
-- $J_A$ = representative central Jacobian value for parcel A
-- $J_B$ = representative central Jacobian value for parcel B
-
-This term increases the weight of edges linking parcels whose deformation
-magnitudes are both far from the healthy reference value of 1.0.
-
-### Step 3: Final edge weight
-
-The final morphometric edge weight is:
-
-$$
-W_{AB} = (1 - \mathrm{JSD}(P_A, P_B)) \times |J_A - 1| \times |J_B - 1|
-$$
+- For **Wasserstein distance**, convert distance into a similarity score before
+  adding the edge to the graph.
+- For **KL divergence (Gaussian version)**, use the divergence-derived pairwise
+  comparison defined on Gaussian parcel summaries.
+- For **Median + IQR**, use robust summary-statistic comparisons rather than
+  full-density matching.
 
 👉 Result:
 - Nodes = parcels
-- Edge weights = similarity of Jacobian distributions, amplified by anomaly intensity
-
-This produces a graph that highlights parcels that are both:
-- morphometrically similar
-- meaningfully abnormal
+- Edge weights = pairwise parcel relationships under three alternative
+  morphometric definitions
 
 ---
 
-## 6. Adaptive Sparsification and Community Detection
+## 6. Graph Construction
 
-### Adaptive sparsification
+For each subject and for each edge definition:
 
-The pairwise weight matrix is initially dense. To suppress weak background
-connections and retain only subject-specific abnormal structure, apply an
-adaptive threshold:
+- build a graph using the corresponding parcel-to-parcel edge weights
+- start with a **fully dense graph**
+- later, evaluate **2-3 different thresholding strategies**
+
+Recommended workflow:
+
+1. construct the full dense weighted graph
+2. compute graph statistics on the dense version first
+3. then test a small set of thresholded variants for sensitivity analysis
+
+This makes it possible to compare how stable downstream results are with
+respect to sparsification.
+
+---
+
+## 7. Graph Metric
+
+For each graph, compute the **weighted degree** of every parcel:
 
 $$
-\mathrm{Threshold} = \mu_{\mathrm{global}} + \sigma_{\mathrm{global}}
+\mathrm{WeightedDegree}_i = \frac{\sum_j w_{ij}}{N}
 $$
 
-where $\mu_{\mathrm{global}}$ and $\sigma_{\mathrm{global}}$ are computed from the
-full distribution of edge weights for that subject.
+where:
 
-Keep only edges satisfying:
+- $w_{ij}$ is the edge weight between parcel $i$ and parcel $j$
+- $N$ is the number of nodes in the graph
 
-$$
-W_{AB} > \mu_{\mathrm{global}} + \sigma_{\mathrm{global}}
-$$
+👉 Primary graph-level readout:
+- weighted degree = sum of edge weights / number of nodes
 
-👉 Result:
-- weak and noisy connections are removed
-- the dense matrix becomes a **sparse weighted graph**
-- retained edges represent stronger-than-background abnormal similarity
+### Interpretation of weighted degree
 
-
-# Potential Issues
-- A distribution loses within-parcel spatial layout. Two parcels can have the same histogram but different spatial organization of abnormal voxels.
-
-- All-to-all JSD is still an O(N^2) step, so this is biologically cleaner than correlation but not automatically cheaper computationally.
-
-- The mu + sigma threshold is reasonable as a first heuristic, but it may create very different graph densities across subjects. That could affect comparability and Leiden stability.
-### Community detection
-
-Apply **Leiden community detection** on the resulting sparse weighted graph.
-
-### Output:
-- Groups of parcels with **coordinated deformation patterns**
-
-### Interpretation:
-- Candidate **atrophy networks**
-- Reflect structured morphological dependencies
-
-👉 This is the main biologically meaningful result
-
-### Limitations and safeguards
-
-To make the method more robust and scalable, we explicitly include the
-following safeguards:
-
-#### A. Preserve some within-parcel spatial structure
-
-A histogram alone does not encode where abnormal voxels are located inside the
-parcel. Two parcels may have similar Jacobian distributions but different
-spatial organization.
-
-Mitigation:
-- augment each parcel representation with a small set of spatial descriptors
-- examples: centroid of abnormal voxels, spatial variance, compactness, or a
-  simple fragmentation score
-- optional extension: build a small number of sub-histograms within coarse
-  parcel subzones rather than using one global histogram only
-
-This keeps the distribution-based idea while reducing the risk of treating
-spatially distinct abnormalities as equivalent.
-
-#### B. Avoid full all-to-all JSD when possible
-
-Exact pairwise JSD over all parcels scales as $O(N^2)$, which can become
-costly at high resolution.
-
-Mitigation:
-- use a two-stage graph construction strategy
-- first, compute a cheap coarse similarity on lightweight features
-- then, for each parcel, retain only a candidate neighborhood of likely matches
-- compute exact JSD only within that reduced candidate set
-
-Candidate screening may use:
-- coarse histogram embeddings
-- median or mean Jacobian similarity
-- anomaly magnitude similarity
-- optional anatomical neighborhood constraints
-
-This preserves the biologically meaningful JSD comparison while avoiding
-unnecessary pairwise evaluations.
-
-#### C. Stabilize sparsification across subjects
-
-The threshold $\mu_{\mathrm{global}} + \sigma_{\mathrm{global}}$ is a useful
-subject-adaptive heuristic, but it may yield different graph densities across
-subjects, which can affect comparability and Leiden stability.
-
-Mitigation:
-- treat $\mu + \sigma$ as an exploratory threshold, not the only one
-- compare it against fixed-density strategies such as top-$k$ neighbors per
-  parcel or a fixed percentile threshold
-- report resulting graph density per subject as a quality-control variable
-- prefer density-matched graphs for cross-subject comparisons and statistical
-  analyses
-
-Recommended practical strategy:
-- exploratory analysis: adaptive threshold $\mu + \sigma$
-- primary analysis: fixed top-$k$ or fixed percentile sparsification
-
-This balances sensitivity to subject-specific signal with reproducibility across
-the cohort.
+- High weighted degree means a parcel is morphometrically similar to many
+  other parcels.
+- Diseased parcels are expected to be more atrophied and to show deformation
+  patterns that deviate from the rest of the brain.
+- Therefore, diseased parcels are hypothesized to show **lower weighted
+  degree** than healthy parcels.
 
 ---
 
-# 🧪 Feasibility Study (Revised)
+## 8. Datasets for Validation
 
-## Objective:
-Evaluate computational feasibility on **IRBIO cluster (CPU + RAM)**
+Validation will be carried out on the following datasets:
 
----
+- **OASIS**
+- **Epilepsy dataset**
+- **PPMI**
+- **Psychiatric datasets**
 
-## Step 1: Distribution-Based Graph Benchmark
-
-Benchmark the proposed method with synthetic parcel distributions:
-
-- Nodes: 10k → 50k → 90k (progressively)
-- Each node stores a histogram or probability vector
-- Pairwise similarity computed via JSD
-- Edge weights modulated by anomaly magnitude
-- Adaptive thresholding applied per synthetic subject
-
-Measure:
-- Memory usage
-- Runtime of pairwise JSD computation
-- Runtime of sparsification
-- Runtime of Leiden
+These datasets provide the test bed for comparing graph-derived parcel metrics
+between healthy and diseased groups.
 
 ---
 
-## Step 2: Leiden Benchmark
+## 9. Validation Procedure
 
-Run:
-LEIDEN_COMMUNITIES(Graph)
+For each subject-level graph:
 
-Using:
-- `igraph`
-- weighted, undirected graph
+1. compute the **weighted degree** for every parcel
+2. split subjects into:
+   - **Healthy**
+   - **Diseased (137 subjects)**
+3. for each parcel:
+   - compare weighted degree between healthy and diseased groups
+   - run a **t-test**
+   - compute **effect size**
 
-Measure:
-- Execution time
-- Peak RAM usage
-- Scaling with:
-  - number of nodes
-  - graph sparsity
+Repeat this analysis for:
 
----
+- **all parcels** (approximately **90k**)
+- **all three edge metrics**
 
-## Step 3: Distribution Extraction Cost
-
-Evaluate cost of:
-
-- extracting voxel-wise Jacobian determinants per parcel
-- building parcel histograms / density estimates
-- computing anomaly summary values per parcel
-
-⚠️ Expected:
-- relatively cheap (linear in voxel count)
-- not a bottleneck
+👉 Core validation question:
+- which parcels show the strongest group differences in weighted degree, and
+  how consistent are those differences across edge definitions?
 
 ---
 
-## Step 4: Resolution Study
+# 🧪 Practical Study Design
 
-Test different parcel scales:
+## Primary analysis
 
-- Low resolution (~1k parcels)
-- Medium (~5k–10k)
-- High (~20k–50k+)
+- Build one graph per subject for each of the three edge definitions
+- Compute parcel-wise weighted degree
+- Perform parcel-wise healthy vs diseased comparisons
+- Record both significance and effect size
 
-Measure:
-- Graph size
-- Runtime
-- Memory usage
-- Stability of detected communities
+## Sensitivity analysis
 
-👉 Identify **maximum feasible resolution**
+- Start from fully dense graphs
+- Later test **2-3 threshold choices**
+- Re-run the weighted-degree validation after thresholding
 
----
+## Scale
 
-## Step 5: Data Constraint
-
-- Exclude:
-  - ❌ White matter
-- Include:
-  - ✅ Cortical gray matter
-  - ✅ Subcortical gray matter
+- Perform the analysis across the full parcellation
+- Target scale: approximately **90k parcels**
 
 ---
 
-# 🔁 Baseline Comparisons
+# 🕰️ Legacy Methods
 
-To contextualize results, implement two additional pipelines:
+The following methods remain part of the project as **legacy approaches** from
+earlier exploration, but they are no longer the primary validation pathway:
 
----
+## A. Leiden-Based Graph Clustering
 
-## A. Fast Baseline (Feature Clustering)
+- Sparse weighted graph construction
+- **Leiden community detection**
 
-- Input: parcel feature vectors (no graph)
-- Method: **Mini-batch K-means**
+Historical purpose:
+- identify communities of parcels with coordinated deformation patterns
 
-Purpose:
-- extremely scalable
-- sanity check for morphometric grouping
+Current status:
+- retained for comparison and historical reference
+- not the main validation endpoint
 
-Limitation:
-- ignores network structure
+## B. Mini-Batch Clustering
 
----
+- **Mini-batch K-means** on parcel-level features
+- optional dimensionality reduction before clustering
 
-## B. Intermediate Baseline (Optional)
+Historical purpose:
+- fast scalable clustering baseline
 
-- Input: richer parcel representations
-- Apply dimensionality reduction (e.g. PCA / SVD)
-- Cluster with mini-batch K-means
-
-Purpose:
-- bridge between feature clustering and graph methods
-
----
-
-## C. Main Pipeline (Target Method)
-
-- JSD-weighted anomaly graph + Leiden
-
-Purpose:
-- capture **network-level morphometric organization**
+Current status:
+- retained as a legacy baseline
+- not the main analysis for the current project description
 
 ---
 
 # 🚫 What to Avoid
 
-- Reducing each parcel to the mean Jacobian only
-- Using correlation when the object of comparison is a full probability distribution
-- Keeping dense all-to-all graphs without sparsification
+- Treating one edge definition as definitive before validation
+- Discarding the dense-graph analysis too early
+- Relying only on clustering outputs when the current endpoint is
+  parcel-wise statistical validation
 - Gradient-based / deep learning approaches (for now)
 
-👉 These choices would either discard too much morphometric information or create unnecessary computational burden
+👉 The current emphasis is on validating parcel-wise graph statistics across
+multiple edge definitions and datasets.
 
 ---
 
 # 📊 Evaluation Metrics
 
-For each pipeline:
+### Statistical:
 
-### Computational:
-- Runtime
-- Peak RAM
-- Scaling behavior
+- t-statistics
+- effect sizes
+- parcel-wise healthy vs diseased differences
 
-### Structural:
-- Number of clusters / communities
-- Stability across parameter choices
+### Graph-derived:
 
-### Biological:
-- Anatomical coherence of regions
-- Consistency with known atrophy patterns
+- weighted degree per parcel
+- sensitivity to threshold choice
+- consistency across the three edge definitions
+
+### Practical:
+
+- runtime
+- peak RAM
+- scalability to approximately 90k parcels
 
 ---
 
 # 🎯 Final Output Goal
 
-- Identify **networks of coordinated deformation**
-- Produce:
-  - list of relevant brain regions
-  - community assignments per parcel
-  - subject-level morphometric network structure
+- Build parcel graphs under three alternative edge definitions
+- Compute parcel-wise weighted degree for each subject
+- Identify parcels whose weighted degree differs between healthy and diseased
+  groups
+- Quantify how robust those findings are across datasets and threshold choices
 
 ---
 
@@ -418,18 +302,23 @@ For each pipeline:
 
 ### Core idea:
 
-> Represent each parcel by the distribution of Jacobian determinants from the warp, compare parcels with Jensen-Shannon divergence, weight similarities by anomaly intensity, sparsify adaptively, and apply Leiden community detection.
+> Represent each parcel through morphometric summaries derived from the warp,
+> construct dense subject-level graphs using three alternative edge
+> definitions, compute parcel-wise weighted degree, and validate group
+> differences between healthy and diseased subjects.
 
 ---
 
-### Pipeline hierarchy:
+### Active analysis path:
 
-1. **Mini-batch K-means (simple parcel summaries)** → fastest baseline  
-2. **Mini-batch K-means (distribution-derived features)** → intermediate  
-3. **JSD-weighted anomaly graph + Leiden** → main method  
+1. **Wasserstein-based graph**
+2. **Gaussian KL-based graph**
+3. **Median + IQR-based graph**
+4. **Weighted-degree validation across parcels and datasets**
 
 ---
 
-### Key feasibility principle:
+### Legacy methods kept in scope:
 
-> Preserve the full parcel-level deformation profile where it matters, but enforce sparsity after weighting so the resulting graph remains biologically focused and computationally manageable.
+1. **Leiden community detection** → legacy graph method  
+2. **Mini-batch K-means** → legacy clustering baseline
