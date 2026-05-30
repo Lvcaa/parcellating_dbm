@@ -1,3 +1,25 @@
+"""
+Split one segmentation ROI into approximately equal-sized sub-parcel masks.
+
+The clustering-based implementation constrains parcels spatially and writes
+one NIfTI mask per output parcel under ``<output-root>/<roi-label>/``.
+
+Usage:
+    python scripts/parcellation/sub_parcels_equal_size.py [options]
+
+Parameters:
+    --roi-label INT          Segmentation label to split (default: 10).
+    --parcel-size INT        Target voxels per parcel (default: 27).
+    --segmentation PATH      Input segmentation image.
+    --output-root PATH       Root for ROI-specific folders (default: outputs/rois).
+    --skip-neighbor-check    Skip local connectivity diagnostics.
+
+Examples:
+    python scripts/parcellation/sub_parcels_equal_size.py
+    python scripts/parcellation/sub_parcels_equal_size.py --roi-label 49 --parcel-size 15
+    python scripts/parcellation/sub_parcels_equal_size.py --roi-label 10 --output-root outputs/custom_rois --skip-neighbor-check
+"""
+
 import argparse
 import time
 from pathlib import Path
@@ -16,20 +38,6 @@ from sklearn.neighbors import NearestCentroid
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_SEGMENTATION = PROJECT_ROOT / "data" / "reference" / "MNI152_T1_1mm_seg.nii.gz"
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "rois"
-""" 
-Script to split a segmentation ROI into approximately equal-sized sub-parcels.
-The script takes a segmentation image and a specified ROI label, and it divides the voxels
-belonging to that ROI into sub-parcels of approximately equal size.
-
-The resulting sub-parcels are saved as separate NIfTI images in an output directory.
-The script uses agglomerative clustering with a connectivity graph to ensure that the 
-sub-parcels are spatially contiguous. After clustering, it applies a linear assignment 
-algorithm to assign voxels to the nearest cluster centroids, 
-ensuring that each sub-parcel has approximately the desired number of voxels. 
-
-The script also includes an optional local connectivity diagnostic to check 
-if any voxels in the sub-parcels are not directly neighboring other voxels in the same sub-parcel.
-"""
 
 def parse_args():
     parser = argparse.ArgumentParser(

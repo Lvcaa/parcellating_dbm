@@ -1,3 +1,28 @@
+"""
+Run sub-parcellation and aggregation for retained, non-deferred ROI labels.
+
+The script estimates distance-matrix RAM before invoking the sibling
+parcellation and aggregation utilities as subprocesses.
+
+Usage:
+    python scripts/parcellation/separate_cases/run_allowed_parcellations.py [options]
+
+Parameters:
+    --segmentation PATH              Input segmentation image.
+    --output-root PATH               ROI parcel root (default: outputs/rois).
+    --aggregated-output-root PATH    Aggregated NIfTI root.
+    --parcel-size INT                Target voxels per parcel (default: 15).
+    --skip-neighbor-check            Skip connectivity diagnostics.
+    --aggregate-workers INT          Workers passed to aggregation (default: 1).
+    --max-estimated-distance-gb N    RAM preflight limit in GiB (default: 8.0).
+    --allow-high-memory-labels       Continue when a preflight warning is raised.
+
+Examples:
+    python scripts/parcellation/separate_cases/run_allowed_parcellations.py
+    python scripts/parcellation/separate_cases/run_allowed_parcellations.py --parcel-size 10 --aggregate-workers 4
+    python scripts/parcellation/separate_cases/run_allowed_parcellations.py --max-estimated-distance-gb 12 --allow-high-memory-labels
+"""
+
 import argparse
 import re
 import subprocess

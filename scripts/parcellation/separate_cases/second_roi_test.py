@@ -1,3 +1,24 @@
+"""
+Split one segmentation ROI with the alternative connected region-growing path.
+
+Each approximately equal-sized parcel is written as a NIfTI mask under
+``<output-root>/<roi-label>/``.
+
+Usage:
+    python scripts/parcellation/separate_cases/second_roi_test.py [options]
+
+Parameters:
+    --roi-label INT          Segmentation label to split (default: 10).
+    --parcel-size INT        Target voxels per parcel (default: 27).
+    --segmentation PATH      Input segmentation image.
+    --output-root PATH       Root for ROI-specific folders (default: outputs/rois).
+    --skip-neighbor-check    Skip connectivity diagnostics.
+
+Examples:
+    python scripts/parcellation/separate_cases/second_roi_test.py
+    python scripts/parcellation/separate_cases/second_roi_test.py --roi-label 42 --parcel-size 15 --skip-neighbor-check
+"""
+
 import argparse
 import time
 from collections import deque

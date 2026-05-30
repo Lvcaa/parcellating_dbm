@@ -1,12 +1,24 @@
 """
-Rename roi_*.nii.gz files across all label folders under outputs/rois/
-with globally unique, sequential IDs.
+Rename ROI parcel masks with globally unique sequential IDs.
 
-Folders are processed in numeric order. Within each folder, files are
-processed in sorted order. No file content is modified — only names change.
+Numeric label folders under ``outputs/rois`` are processed in order. File
+contents are unchanged. A lookup CSV records the global ID range assigned to
+each label. Run with ``--dry-run`` first because the default operation renames
+files in place.
 
-A lookup CSV is written to docs/label_lookup.csv with one row per label,
-recording the global ID range assigned to that label's parcels.
+Usage:
+    python scripts/parcellation/assign_unique_labels.py [options]
+
+Parameters:
+    --rois-dir PATH    Directory containing numeric label folders
+                       (default: outputs/rois).
+    --csv-path PATH    Destination lookup CSV (default: docs/label_lookup.csv).
+    --dry-run          Print proposed changes without renaming or writing CSV.
+
+Examples:
+    python scripts/parcellation/assign_unique_labels.py --dry-run
+    python scripts/parcellation/assign_unique_labels.py
+    python scripts/parcellation/assign_unique_labels.py --rois-dir outputs/custom_rois --csv-path docs/custom_label_lookup.csv --dry-run
 """
 
 import csv

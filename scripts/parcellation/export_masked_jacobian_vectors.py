@@ -1,3 +1,30 @@
+"""
+Extract parcel-level Jacobian vectors and save one ``.npy`` file per mask.
+
+The script supports a single Jacobian image or batch processing of matching
+images in a directory. Outputs are written under
+``<output-dir>/<subject-id>/label_<label>/``.
+
+Usage:
+    python scripts/parcellation/export_masked_jacobian_vectors.py [options]
+
+Parameters:
+    --input-dir PATH          Batch directory containing Jacobian images.
+    --rois-dir PATH           ROI mask root (default: outputs/rois).
+    --jacobian PATH           Jacobian image used in single-image mode.
+    --output-dir PATH         Output root (default: outputs/jacobian_parcel_vectors).
+    --label INT               Export one label only; otherwise export all labels.
+    --n-parcels INT           Export this many masks per selected label.
+    --sample-mode MODE        ``first`` or seeded ``random`` (default: first).
+    --seed INT                Seed for random sampling (default: 7).
+    --num-workers INT         Worker threads per subject-label batch (default: 1).
+
+Examples:
+    python scripts/parcellation/export_masked_jacobian_vectors.py
+    python scripts/parcellation/export_masked_jacobian_vectors.py --label 49 --n-parcels 50 --sample-mode random --seed 7
+    python scripts/parcellation/export_masked_jacobian_vectors.py --input-dir data/jacobians --num-workers 4
+"""
+
 from __future__ import annotations
 
 """

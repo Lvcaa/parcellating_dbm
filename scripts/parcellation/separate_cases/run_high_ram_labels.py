@@ -1,3 +1,27 @@
+"""
+Run sub-parcellation and aggregation for deferred high-memory ROI labels.
+
+Labels are read from a text file, validated against the retained-label list,
+and processed after memory estimates are printed.
+
+Usage:
+    python scripts/parcellation/separate_cases/run_high_ram_labels.py [options]
+
+Parameters:
+    --segmentation PATH              Input segmentation image.
+    --output-root PATH               ROI parcel root (default: outputs/rois).
+    --aggregated-output-root PATH    Aggregated NIfTI root.
+    --parcel-size INT                Target voxels per parcel (default: 15).
+    --skip-neighbor-check            Skip connectivity diagnostics.
+    --aggregate-workers INT          Workers passed to aggregation (default: 1).
+    --labels-file PATH               Text file with one label per line.
+    --max-estimated-distance-gb N    Warning threshold in GiB (default: 8.0).
+
+Examples:
+    python scripts/parcellation/separate_cases/run_high_ram_labels.py
+    python scripts/parcellation/separate_cases/run_high_ram_labels.py --labels-file scripts/parcellation/high_memory_labels.txt --aggregate-workers 4 --skip-neighbor-check
+"""
+
 import argparse
 import sys
 from pathlib import Path

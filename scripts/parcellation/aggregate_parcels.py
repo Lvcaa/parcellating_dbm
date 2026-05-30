@@ -1,3 +1,19 @@
+"""
+Aggregate the ``roi_*.nii.gz`` masks in one folder into one NIfTI volume.
+
+Usage:
+    python scripts/parcellation/aggregate_parcels.py PARCELS_DIR OUTPUT_PATH [options]
+
+Parameters:
+    PARCELS_DIR       Directory containing ``roi_*.nii.gz`` parcel masks.
+    OUTPUT_PATH       Destination path for the aggregated NIfTI image.
+    --workers INT     Worker processes used while loading masks (default: 1).
+
+Examples:
+    python scripts/parcellation/aggregate_parcels.py outputs/rois/10 outputs/aggregated_parcellations/10_left_thalamus.nii.gz
+    python scripts/parcellation/aggregate_parcels.py outputs/rois/49 outputs/aggregated_parcellations/49_right_thalamus.nii.gz --workers 4
+"""
+
 import argparse
 from concurrent.futures import ProcessPoolExecutor
 import nibabel as nib
