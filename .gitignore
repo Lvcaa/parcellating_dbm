@@ -3,3 +3,4 @@ __pycache__/
 outputs/
 containers/parcellating_dbm.def
 parcellation-test.tar
+.claude/
