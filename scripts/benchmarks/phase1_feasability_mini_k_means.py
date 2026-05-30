@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
 """
-Phase 1 Feasibility - Worst-Case Dense Matrix + MiniBatch K-Means Benchmark
-============================================================================
-Benchmarks a pure worst-case alternative to Leiden by building a dense
-synthetic weighted adjacency matrix directly and clustering node connectivity
-profiles with MiniBatch K-Means.
+Benchmark a dense-matrix MiniBatch K-Means alternative for Phase 1.
 
-  Stage A  -  skipped in this worst-case mode
-
-  Stage B  -  Build a dense weighted adjacency matrix A
-               Density   :  controlled by --leiden-density
-               Weights   :  random float32 values in [0, 1]
-               Clusters  :  MiniBatch K-Means on the rows of A
-
-Why this benchmark exists:
-  The goal is to isolate the cost of clustering a dense 36k x 36k connectivity
-  representation without first depending on Pearson-thresholded edges. This
-  makes --leiden-density 0.30 a direct 30% worst-case stress test.
-
-Parameter compatibility:
-  --voxels and --r-threshold are accepted so the CLI stays aligned with the
-  existing Phase 1 benchmark, but they are not used in this worst-case mode.
-
-Important note:
-  MiniBatch K-Means is not a graph community detection algorithm. It clusters
-  nodes by similarity of their connectivity profiles. This script is meant as
-  a computational feasibility benchmark, not as a claim of methodological
-  equivalence with Leiden.
+This is a computational feasibility test for clustering connectivity profiles,
+not a graph community-detection method. The existing filename intentionally
+uses the spelling ``feasability``.
 
 Usage:
-    python scripts/benchmarks/phase1_feasability_mini_k_means.py --save-report
-    python scripts/benchmarks/phase1_feasability_mini_k_means.py --nodes 36000 --leiden-density 0.30
-    python scripts/benchmarks/phase1_feasability_mini_k_means.py --nodes 36000 --leiden-density 0.30 --n-clusters 100
+    python scripts/benchmarks/phase1_feasability_mini_k_means.py [options]
+
+Parameters:
+    --nodes INT              Parcels (default: 36000).
+    --voxels INT             Accepted for CLI compatibility; unused.
+    --r-threshold FLOAT      Accepted for CLI compatibility; unused.
+    --leiden-density FLOAT   Direct dense-matrix density (default: 0.10).
+    --seed INT               Random seed (default: 42).
+    --n-clusters INT         Fixed K-Means cluster count; inferred when omitted.
+    --save-report            Write a timestamped text report.
+
+Examples:
+    python scripts/benchmarks/phase1_feasability_mini_k_means.py --nodes 1000 --leiden-density 0.10
+    python scripts/benchmarks/phase1_feasability_mini_k_means.py --nodes 36000 --leiden-density 0.30 --n-clusters 100 --save-report
 """
 
 import argparse

@@ -1,3 +1,24 @@
+"""
+Benchmark Leiden community detection on a sampled sparse synthetic graph.
+
+The script builds a SciPy sparse adjacency matrix, converts it to igraph, and
+reports timings and peak RSS.
+
+Usage:
+    python scripts/benchmarks/fake_matrix_stress_test_sparse.py [options]
+
+Parameters:
+    --nodes INT          Graph nodes (default: 10000).
+    --density FLOAT      Sparse undirected edge density in [0, 1) (default: 0.001).
+    --seed INT           Random seed (default: 42).
+    --use-probability    Sample edge count from a binomial distribution.
+    --unweighted         Use unit edges and run Leiden without weights.
+
+Examples:
+    python scripts/benchmarks/fake_matrix_stress_test_sparse.py
+    python scripts/benchmarks/fake_matrix_stress_test_sparse.py --nodes 36000 --density 0.0005 --unweighted
+"""
+
 import argparse
 import gc
 import math

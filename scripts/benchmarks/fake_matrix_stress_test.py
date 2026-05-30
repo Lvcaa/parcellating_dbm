@@ -1,3 +1,24 @@
+"""
+Benchmark Leiden community detection on a synthetic igraph graph.
+
+Edge count and RAM grow quickly with node count and density. Start with a
+small run before using the defaults.
+
+Usage:
+    python scripts/benchmarks/fake_matrix_stress_test.py [options]
+
+Parameters:
+    --nodes INT          Graph nodes (default: 10000).
+    --density FLOAT      Undirected edge density in [0, 1] (default: 0.30).
+    --seed INT           Random seed (default: 42).
+    --use-probability    Use Erdos-Renyi probability mode instead of exact edges.
+    --unweighted         Skip edge weights.
+
+Examples:
+    python scripts/benchmarks/fake_matrix_stress_test.py --nodes 1000 --density 0.05
+    python scripts/benchmarks/fake_matrix_stress_test.py --nodes 5000 --density 0.01 --use-probability --unweighted
+"""
+
 import argparse
 import math
 import time

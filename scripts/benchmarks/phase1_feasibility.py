@@ -1,32 +1,26 @@
 #!/usr/bin/env python3
 """
-Phase 1 Feasibility – Full Correlation Matrix + r-Threshold Benchmark
-======================================================================
-Simulates the real pipeline for each subject:
+Benchmark dense parcel correlation, Pearson thresholding, and Leiden timing.
 
-  Stage A  –  Correlation matrix (the new expensive step)
-               Generate X  :  (n_parcels × voxels_per_parcel)  float32
-               Normalise X :  mean-centre + L2-norm each row
-               Compute C   :  X @ X.T  →  exact Pearson r matrix  (float32, n×n)
-               Threshold   :  keep edges where r > threshold (default 0.5)
-               → produces a principled sparse edge list
-
-  Stage B  –  Leiden community detection on the resulting graph
-
-Why dense then sparse (not sparse from the start):
-  We compute C as a full n×n matrix so that NO pairwise relationship is ever
-  missed.  The sparsity in the final graph is a consequence of biology (most
-  parcel pairs have |r| < 0.5) not a computational shortcut.  On random data
-  Stage A will find ~0 edges; Stage B then runs on a synthetic graph at the
-  expected post-threshold density so Leiden is always timed.
-
-From the project plan (Appendix B):
-  Accept thresholds:  Leiden runtime < 5 min  AND  peak memory < 64 GB
+This Phase 1 feasibility script simulates per-subject graph construction. It
+builds the full float32 correlation matrix so every pairwise relationship is
+evaluated, then thresholds edges and runs Leiden. The full target can allocate
+substantial RAM; begin with a smaller node count.
 
 Usage:
-    python scripts/benchmarks/phase1_feasibility.py --save-report
-    python scripts/benchmarks/phase1_feasibility.py --nodes 10000 --voxels 27
+    python scripts/benchmarks/phase1_feasibility.py [options]
+
+Parameters:
+    --nodes INT              Parcels (default: 36000).
+    --voxels INT             Voxels per parcel (default: 27).
+    --r-threshold FLOAT      Pearson edge threshold in (0, 1) (default: 0.5).
+    --leiden-density FLOAT   Fallback synthetic graph density (default: 0.10).
+    --seed INT               Random seed (default: 42).
+    --save-report            Write a timestamped report to outputs/benchmarks.
+
+Examples:
     python scripts/benchmarks/phase1_feasibility.py --nodes 1000 --voxels 27 --r-threshold 0.5 --leiden-density 0.02
+    python scripts/benchmarks/phase1_feasibility.py --save-report
 """
 
 import argparse
