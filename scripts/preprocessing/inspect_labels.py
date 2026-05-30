@@ -1,3 +1,18 @@
+"""
+Inspect retained segmentation labels and write the binary keep-label mask.
+
+The script prints voxel counts and their greatest common divisor. It has no
+command-line parameters; paths and retained labels are configured in source.
+
+Usage:
+    python scripts/preprocessing/inspect_labels.py
+
+Configured inputs and outputs:
+    Input segmentation: data/reference/MNI152_T1_1mm_seg.nii.gz
+    Output mask:        data/reference/MNI152_keep_labels_mask.nii.gz
+    Retained labels:    ``keep_labels`` in this module
+"""
+
 from pathlib import Path
 
 import nibabel as nib

@@ -1,3 +1,28 @@
+"""
+Run ANTs nonlinear registration and compute a Jacobian determinant image.
+
+ANTs must be installed with ``antsRegistrationSyNQuick.sh`` and
+``CreateJacobianDeterminantImage`` available in ``PATH``. Outputs are written
+under ``<output-root>/<subject-id>/``.
+
+Usage:
+    python scripts/registration/run_ants_jacobian.py --fixed-image PATH [options]
+
+Parameters:
+    --fixed-image PATH       Required reference image in target space.
+    --moving-image PATH      Subject T1 image to register.
+    --output-root PATH       ANTs output root (default: outputs/ants_registration).
+    --subject-id TEXT        Optional output-folder ID; inferred when omitted.
+    --dimension {2,3}        Image dimensionality (default: 3).
+    --transform-type TYPE    ANTs transform type: t, r, a, s, sr, so, or b.
+    --threads INT            ITK thread count (default: 1).
+    --write-raw-jacobian     Also write the raw Jacobian image.
+
+Examples:
+    python scripts/registration/run_ants_jacobian.py --fixed-image data/reference/MNI152_T1_1mm.nii.gz
+    python scripts/registration/run_ants_jacobian.py --fixed-image data/reference/MNI152_T1_1mm.nii.gz --moving-image data/subjects/sub-0006_T1w.nii.gz --subject-id sub-0006 --threads 8 --write-raw-jacobian
+"""
+
 from __future__ import annotations
 
 import argparse

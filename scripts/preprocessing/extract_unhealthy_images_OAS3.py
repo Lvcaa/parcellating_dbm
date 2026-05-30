@@ -1,14 +1,23 @@
 """
-Identify the most atrophied subjects in the OASIS-3 FreeSurfer dataset.
+Identify the most atrophied OASIS-3 sessions from the configured FreeSurfer CSV.
 
-Composite atrophy score = mean of 5 ICV-normalized z-scores:
-  - hippocampal volume     (low  → more atrophy)
-  - lateral ventricle vol  (high → more atrophy)
-  - WM hypointensities     (high → more disease)
-  - entorhinal cortex vol  (low  → more atrophy)
-  - total cortex volume    (low  → more atrophy)
+The script computes an ICV-normalized composite score, keeps the worst session
+per subject, prints a summary, and writes a session ID list next to this file.
+The input CSV path is configured in ``CSV_PATH``.
 
-Outputs a .txt file listing the MR session IDs of the most atrophied subjects.
+Usage:
+    python scripts/preprocessing/extract_unhealthy_images_OAS3.py [options]
+
+Parameters:
+    --top-n INT         Maximum subjects to keep; 0 removes the cap (default: 30).
+    --min-score FLOAT   Minimum composite score for inclusion (default: 2.0).
+    --output NAME       Output filename written next to this script
+                        (default: unhealthy_sessions_OAS3.txt).
+
+Examples:
+    python scripts/preprocessing/extract_unhealthy_images_OAS3.py
+    python scripts/preprocessing/extract_unhealthy_images_OAS3.py --top-n 0 --min-score 1.5
+    python scripts/preprocessing/extract_unhealthy_images_OAS3.py --top-n 50 --output unhealthy_sessions_top50.txt
 """
 
 import argparse
