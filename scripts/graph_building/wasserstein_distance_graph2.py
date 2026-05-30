@@ -1,20 +1,30 @@
 """
 Build a dense Wasserstein similarity graph for one subject.
 
-Optimised path (replaces the scipy pairwise loop):
-  - All parcel vectors are sorted once and projected onto a common 15-point
-    quantile grid (the ~71 parcels shorter than 15 are interpolated; the
-    60 314 parcels that are exactly 15 are untouched).
-  - For equal-length sorted samples, 1-D Wasserstein reduces to the mean
-    absolute difference of the two sorted arrays, so the full N×N distance
-    matrix is computed as batched numpy operations — no scipy calls at all.
-  - Row-blocks are distributed across workers; the sorted matrix (≈3.6 MB)
-    is small enough to pass directly without shared-memory overhead.
-  - The adjacency matrix and weighted-degree vector are stored as float32
-    memmaps (half the size of float64 with no meaningful loss in precision
-    for similarity values in [0, 1]).
-  - The distance-to-similarity transform must be selected explicitly with
-    --sim-formula.
+Parcel vectors are sorted and projected onto a common 15-point quantile grid.
+Batched NumPy operations compute row blocks in parallel. The adjacency matrix
+is stored as a float32 memmap and weighted degree as a float64 memmap. Storage
+and compute cost grow quadratically with the parcel count.
+
+Usage:
+    python scripts/graph_building/wasserstein_distance_graph2.py (--input-folder PATH | --subject-id ID) --sim-formula {1,2} [options]
+
+Parameters:
+    --input-folder PATH      Direct subject parcel-vector folder.
+    --input-root PATH        Subject-folder root (default: outputs/jacobian_parcel_vectors).
+    --subject-id TEXT        Folder name under --input-root when --input-folder is omitted.
+    --output-folder PATH     Custom graph output folder.
+    --sim-formula {1,2}      Required transform: 1 = exp(-W), 2 = 1/(1+W).
+    --num-workers INT        Worker processes (default: 8).
+    --block-size INT         Rows per worker job (default: 500).
+    --progress-every INT     Progress interval in completed blocks (default: 10).
+
+Outputs:
+    adjacency_matrix.dat, weighted_degree.dat, metadata.npy, parcel_order.txt
+
+Examples:
+    python scripts/graph_building/wasserstein_distance_graph2.py --subject-id sub-0091 --sim-formula 1
+    python scripts/graph_building/wasserstein_distance_graph2.py --input-folder outputs/jacobian_parcel_vectors/sub-OAS30999 --sim-formula 2 --num-workers 4 --block-size 200
 """
 
 from __future__ import annotations

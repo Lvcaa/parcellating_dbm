@@ -1,3 +1,26 @@
+"""
+Inspect or build a Wasserstein graph and save diagnostic plots.
+
+The script prints sanity checks and strongest edges, then saves an adjacency
+heatmap and weighted-degree histogram. ``matplotlib`` and ``seaborn`` are
+required.
+
+Usage:
+    python scripts/graph_building/inspect_wasserstein_graph.py [options]
+
+Parameters:
+    --graph-dir PATH       Existing graph folder used when --labels is omitted.
+    --output-dir PATH      Plot destination; defaults to an inspection subfolder.
+    --labels INT [...]     Build an in-memory merged graph from these ROI labels.
+    --vectors-root PATH    Root containing label_<label>/roi_*.npy folders.
+    --show                 Display figures interactively after saving.
+    --top-k-edges INT      Strongest off-diagonal edges to print (default: 10).
+
+Examples:
+    python scripts/graph_building/inspect_wasserstein_graph.py --graph-dir outputs/wasserstein_graph_label_10
+    python scripts/graph_building/inspect_wasserstein_graph.py --labels 10 49 --vectors-root outputs/jacobian_parcel_vectors --top-k-edges 20
+"""
+
 from __future__ import annotations
 
 import argparse

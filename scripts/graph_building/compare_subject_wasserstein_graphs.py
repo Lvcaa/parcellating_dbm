@@ -1,3 +1,31 @@
+"""
+Compare Wasserstein weighted-degree vectors for healthy and atrophy subjects.
+
+Parcel order is aligned before degree drops are summarized by parcel and
+anatomical label. Only a focused top-K adjacency submatrix is read for plots.
+``matplotlib`` and ``seaborn`` are required.
+
+Usage:
+    python scripts/graph_building/compare_subject_wasserstein_graphs.py (--healthy-dir PATH --atrophy-dir PATH | --healthy-subject ID --atrophy-subject ID --sim-formula {expW,inv1pW}) [options]
+
+Parameters:
+    --healthy-dir PATH          Explicit healthy graph folder.
+    --atrophy-dir PATH          Explicit atrophy graph folder.
+    --healthy-subject ID        Healthy ID resolved under a formula graph root.
+    --atrophy-subject ID        Atrophy ID resolved under a formula graph root.
+    --sim-formula FORMULA       ``expW`` or ``inv1pW``; alias: --formula.
+    --label-lookup PATH         Label-name CSV (default: docs/label_lookup.csv).
+    --output-dir PATH           Destination folder; inferred when omitted.
+    --top-k INT                 Summary parcel count (default: 25).
+    --submatrix-k INT           Plot submatrix size (default: 50).
+    --adjacency-dtype TYPE      auto, float32, or float64 (default: auto).
+    --show                      Display figures interactively after saving.
+
+Examples:
+    python scripts/graph_building/compare_subject_wasserstein_graphs.py --healthy-subject sub-0006 --atrophy-subject sub-OAS30999 --sim-formula expW
+    python scripts/graph_building/compare_subject_wasserstein_graphs.py --healthy-dir outputs/wasserstein_graphs_inv1pW/sub-0006 --atrophy-dir outputs/wasserstein_graphs_inv1pW/sub-OAS30999 --submatrix-k 30
+"""
+
 from __future__ import annotations
 
 import argparse

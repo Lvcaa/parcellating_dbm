@@ -1,22 +1,23 @@
 """
-Smoke test for Wasserstein graph construction from parcel-level `.npy` vectors.
+Run a direct Wasserstein graph-construction smoke test from parcel vectors.
 
-Workflow
---------
-1. Load every `.npy` parcel vector from one input directory.
-2. Preallocate a full zero similarity matrix of shape `N x N`.
-3. Split row indices across half of the available CPU workers by default.
-4. Each worker computes Wasserstein distance row-by-row and converts it to
-   similarity with `exp(-w)`.
-5. Each worker returns a list of `(i, j, value)` tuples.
-6. Merge all worker results back into the shared matrix in the main process.
-7. Compute weighted degree as `sum(row) / number_of_columns`.
-8. Save weighted degree to a NumPy memory-mapped `.npy` file.
+The script builds an in-memory similarity matrix, computes weighted degree,
+and saves the degree memmap plus parcel order. Use this for small validation
+runs before full graph construction.
 
-This script is intentionally written as a simple smoke test:
-- the matrix is built in memory
-- the weighted degree is persisted as a memory-mapped array
-- the parcel order is also saved so the weighted degree vector stays interpretable
+Usage:
+    python scripts/graph_building/smoke_test.py [options]
+
+Parameters:
+    --input-dir PATH                Directory containing parcel .npy vectors.
+    --output-dir PATH               Default output directory (default: outputs/smoke_test).
+    --weighted-degree-output PATH   Explicit weighted-degree memmap path.
+    --parcel-order-output PATH      Explicit parcel-order text path.
+    --workers INT                   Joblib workers; defaults to half of visible CPUs.
+
+Examples:
+    python scripts/graph_building/smoke_test.py
+    python scripts/graph_building/smoke_test.py --input-dir outputs/jacobian_parcel_vectors/sub-0091/label_10 --output-dir outputs/smoke_test_sub-0091_label_10 --workers 2
 """
 
 from __future__ import annotations
