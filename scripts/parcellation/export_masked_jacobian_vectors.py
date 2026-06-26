@@ -11,7 +11,7 @@ Usage:
 Parameters:
     --input-dir PATH          Batch directory containing Jacobian images.
     --rois-dir PATH           ROI mask root (default: outputs/rois).
-    --jacobian PATH           Jacobian image used in single-image mode.
+    --jacobian PATH           Log-Jacobian image used in single-image mode.
     --output-dir PATH         Output root (default: outputs/jacobian_parcel_vectors).
     --label INT               Export one label only; otherwise export all labels.
     --n-parcels INT           Export this many masks per selected label.
@@ -104,7 +104,7 @@ def parse_args() -> argparse.Namespace:
         "--jacobian",
         type=Path,
         default=DEFAULT_JACOBIAN_PATH,
-        help=f"Path to the Jacobian determinant image (default: {DEFAULT_JACOBIAN_PATH}).",
+        help=f"Path to the log-Jacobian determinant image (default: {DEFAULT_JACOBIAN_PATH}).",
     )
     parser.add_argument(
         "--output-dir",
@@ -243,12 +243,30 @@ def select_parcel_paths(label_dir: Path, n_parcels: int | None, sample_mode: str
     return parcel_paths[:n_parcels]
 
 
+def parcel_output_path(output_dir: Path, parcel_path: Path) -> Path:
+    return output_dir / f"{parcel_path.stem.replace('.nii', '')}.npy"
+
+
 def export_vectors(
     parcel_paths: list[Path],
     jacobian_path: Path,
     output_dir: Path,
     num_workers: int,
 ) -> None:
+    pending_parcel_paths = [
+        parcel_path
+        for parcel_path in parcel_paths
+        if not parcel_output_path(output_dir, parcel_path).is_file()
+    ]
+    skipped_count = len(parcel_paths) - len(pending_parcel_paths)
+    if skipped_count:
+        print(
+            f"Skipping {skipped_count} parcel vector(s) already present in {output_dir}",
+            flush=True,
+        )
+    if not pending_parcel_paths:
+        print(f"All requested parcel vectors already exist in {output_dir}", flush=True)
+        return
 
     # Load the Jacobian image once and keep it in memory for all parcel processing
     jacobian_img = nib.load(str(jacobian_path))
@@ -282,18 +300,23 @@ def export_vectors(
 
         if vector.ndim != 1:
             raise ValueError(f"Expected a 1D masked vector for {parcel_path}, got shape {vector.shape}")
+        if vector.size == 0:
+            raise ValueError(f"Parcel mask contains no voxels: {parcel_path}")
+        if not np.isfinite(vector).all():
+            raise ValueError(f"Masked log-Jacobian vector contains non-finite values: {parcel_path}")
 
         # Save the extracted vector to a .npy file named after the parcel
-        output_path = output_dir / f"{parcel_path.stem.replace('.nii', '')}.npy"
+        output_path = parcel_output_path(output_dir, parcel_path)
         np.save(output_path, vector)
         return index, output_path.name, vector.shape
 
-    indexed_paths = list(enumerate(parcel_paths, start=1))
+    indexed_paths = list(enumerate(pending_parcel_paths, start=1))
     max_workers = min(num_workers, len(indexed_paths)) if indexed_paths else 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         for index, output_name, vector_shape in executor.map(export_single_parcel, indexed_paths):
             print(
-                f"[{index:03d}/{len(parcel_paths):03d}] saved {output_name} with shape {vector_shape}",
+                f"[{index:03d}/{len(pending_parcel_paths):03d}] saved "
+                f"{output_name} with shape {vector_shape}",
                 flush=True,
             )
 
