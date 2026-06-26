@@ -20,7 +20,8 @@ Parameters:
     --progress-every INT     Progress interval in completed blocks (default: 10).
 
 Outputs:
-    adjacency_matrix.dat, weighted_degree.dat, metadata.npy, parcel_order.txt
+    adjacency_matrix.dat, weighted_degree.dat, metadata.npy, metadata.json,
+    parcel_order.txt
 
 Examples:
     python scripts/graph_building/wasserstein_distance_graph2.py --subject-id sub-0091 --sim-formula 1
@@ -30,6 +31,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import time
 from pathlib import Path
 
@@ -175,11 +177,15 @@ def load_subject_parcels(subject_folder: Path) -> tuple[list[str], np.ndarray]:
             v = np.load(npy_path).reshape(-1)
             if v.size == 0:
                 raise ValueError(f"Parcel vector is empty: {npy_path}")
+            if not np.isfinite(v).all():
+                raise ValueError(f"Parcel vector contains non-finite values: {npy_path}")
             parcel_ids.append(f"{label_dir.name}/{npy_path.stem}")
             rows.append(_to_quantile_grid(v))
 
     if not rows:
         raise ValueError(f"No parcel .npy files found under {subject_folder}")
+    if len(set(parcel_ids)) != len(parcel_ids):
+        raise ValueError(f"Duplicate parcel IDs found under {subject_folder}")
 
     return parcel_ids, np.stack(rows, axis=0)  # (N, QUANTILE_LEN)
 
@@ -221,6 +227,11 @@ def _compute_block(
     else:
         raise ValueError(f"Unsupported similarity formula: {sim_formula}")
 
+    if not np.isfinite(sim).all():
+        raise ValueError(f"Non-finite similarities in row block [{i_start}, {i_end})")
+    if np.any(sim <= 0.0) or np.any(sim > 1.0):
+        raise ValueError(f"Similarities outside (0, 1] in row block [{i_start}, {i_end})")
+
     # restore exact 1.0 on the diagonal
     for local_i, global_i in enumerate(range(i_start, i_end)):
         sim[local_i, global_i] = 1.0
@@ -230,6 +241,29 @@ def _compute_block(
 
 def save_parcel_order(parcel_ids: list[str], output_path: Path) -> None:
     output_path.write_text("\n".join(parcel_ids) + "\n", encoding="utf-8")
+
+
+def save_metadata(
+    output_path: Path,
+    subject_id: str,
+    n_parcels: int,
+    sim_formula: int,
+) -> None:
+    metadata = {
+        "subject_id": subject_id,
+        "n_parcels": n_parcels,
+        "node_feature": "15-point quantile representation of parcel log-Jacobian values",
+        "jacobian_type": "log-Jacobian determinant",
+        "quantile_count": QUANTILE_LEN,
+        "distance": "Wasserstein-1 approximated by mean absolute quantile difference",
+        "similarity_formula": SIM_FORMULA_LABELS[sim_formula],
+        "adjacency_dtype": "float32",
+        "weighted_degree_dtype": "float64",
+        "weighted_degree_normalization": "sum of off-diagonal similarities divided by N-1",
+        "self_loops_in_adjacency": True,
+        "self_loops_in_weighted_degree": False,
+    }
+    output_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
 
 def main() -> None:
@@ -251,6 +285,8 @@ def main() -> None:
 
     parcel_ids, sorted_matrix = load_subject_parcels(subject_folder)
     N = len(parcel_ids)
+    if N < 2:
+        raise ValueError("At least two parcels are required to build a graph")
     print(f"Loaded {N} parcels  →  sorted matrix shape {sorted_matrix.shape}", flush=True)
 
     # Pre-compute row block boundaries
@@ -294,7 +330,10 @@ def main() -> None:
         mm_matrix[i_start:i_end, :] = sim_block
         mm_matrix[:, i_start:i_end] = sim_block.T
         # accumulate weighted degree for these rows
-        weighted_degree[i_start:i_end] = (sim_block.sum(axis=1) - 1.0) / (N - 1)
+        block_degree = (sim_block.sum(axis=1, dtype=np.float64) - 1.0) / (N - 1)
+        if not np.isfinite(block_degree).all():
+            raise ValueError(f"Non-finite weighted degree in row block [{i_start}, {i_end})")
+        weighted_degree[i_start:i_end] = block_degree
 
         if completed % args.progress_every == 0 or completed == num_blocks:
             elapsed = time.time() - start_time
@@ -316,6 +355,7 @@ def main() -> None:
     del mm_degree
 
     np.save(out_dir / "metadata.npy", np.array([N], dtype=np.int64))
+    save_metadata(out_dir / "metadata.json", subject_id, N, args.sim_formula)
     save_parcel_order(parcel_ids, out_dir / "parcel_order.txt")
 
     elapsed = time.time() - start_time
