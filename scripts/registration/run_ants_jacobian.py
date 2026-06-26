@@ -128,64 +128,81 @@ def run_command(command: list[str], env: dict[str, str]) -> None:
 def main() -> None:
     args = parse_args()
 
-    validate_input_image(args.fixed_image, "Fixed image")
-    validate_input_image(args.moving_image, "Moving image")
-
-    ants_registration = resolve_executable("antsRegistrationSyNQuick.sh")
-    jacobian_tool = resolve_executable("CreateJacobianDeterminantImage")
-
     subject_id = args.subject_id or infer_subject_id(args.moving_image)
     subject_output_dir = args.output_root / subject_id
-    subject_output_dir.mkdir(parents=True, exist_ok=True)
 
     output_prefix = subject_output_dir / f"{subject_id}_to_template_"
     warp_path = subject_output_dir / f"{subject_id}_to_template_1Warp.nii.gz"
     log_jacobian_path = subject_output_dir / f"{subject_id}_to_template_logJacobian.nii.gz"
     raw_jacobian_path = subject_output_dir / f"{subject_id}_to_template_jacobian.nii.gz"
 
+    requested_outputs = [log_jacobian_path]
+    if args.write_raw_jacobian:
+        requested_outputs.append(raw_jacobian_path)
+    if all(path.is_file() for path in requested_outputs):
+        print(
+            "All requested Jacobian output(s) already exist; skipping registration "
+            f"and Jacobian generation: {subject_output_dir}",
+            flush=True,
+        )
+        return
+
+    validate_input_image(args.fixed_image, "Fixed image")
+    validate_input_image(args.moving_image, "Moving image")
+    subject_output_dir.mkdir(parents=True, exist_ok=True)
+
     env = dict(os.environ)
     env["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(args.threads)
 
-    registration_command = [
-        ants_registration,
-        "-d",
-        str(args.dimension),
-        "-f",
-        str(args.fixed_image),
-        "-m",
-        str(args.moving_image),
-        "-t",
-        args.transform_type,
-        "-o",
-        str(output_prefix),
-    ]
-    run_command(registration_command, env)
+    if warp_path.is_file():
+        print(f"Warp already exists; skipping registration: {warp_path}", flush=True)
+    else:
+        ants_registration = resolve_executable("antsRegistrationSyNQuick.sh")
+        registration_command = [
+            ants_registration,
+            "-d",
+            str(args.dimension),
+            "-f",
+            str(args.fixed_image),
+            "-m",
+            str(args.moving_image),
+            "-t",
+            args.transform_type,
+            "-o",
+            str(output_prefix),
+        ]
+        run_command(registration_command, env)
 
     if not warp_path.is_file():
-        raise FileNotFoundError(
-            f"Expected ANTs warp was not created: {warp_path}"
-        )
+        raise FileNotFoundError(f"Expected ANTs warp was not created: {warp_path}")
 
-    log_jacobian_command = [
-        jacobian_tool,
-        str(args.dimension),
-        str(warp_path),
-        str(log_jacobian_path),
-        "1",
-        "0",
-    ]
-    run_command(log_jacobian_command, env)
-
-    if args.write_raw_jacobian:
-        raw_jacobian_command = [
+    jacobian_tool = resolve_executable("CreateJacobianDeterminantImage")
+    if log_jacobian_path.is_file():
+        print(f"Log-Jacobian already exists; skipping: {log_jacobian_path}", flush=True)
+    else:
+        log_jacobian_command = [
             jacobian_tool,
             str(args.dimension),
             str(warp_path),
-            str(raw_jacobian_path),
-            "0",
+            str(log_jacobian_path),
+            "1",
             "0",
         ]
-        run_command(raw_jacobian_command, env)
+        run_command(log_jacobian_command, env)
+
+    if args.write_raw_jacobian:
+        if raw_jacobian_path.is_file():
+            print(f"Raw Jacobian already exists; skipping: {raw_jacobian_path}", flush=True)
+        else:
+            raw_jacobian_command = [
+                jacobian_tool,
+                str(args.dimension),
+                str(warp_path),
+                str(raw_jacobian_path),
+                "0",
+                "0",
+            ]
+            run_command(raw_jacobian_command, env)
 
     print(f"Registration output folder: {subject_output_dir}", flush=True)
     print(f"Warp field: {warp_path}", flush=True)
