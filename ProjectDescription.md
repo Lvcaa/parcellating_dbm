@@ -55,16 +55,16 @@ Typical scale:
 ## 4. Parcel-Level Feature Construction (Node Features)
 
 Instead of reducing each parcel to a single summary statistic such as the mean,
-we represent each parcel by the **distribution of Jacobian determinant values**
+we represent each parcel by the **distribution of log-Jacobian determinant values**
 measured across all voxels in that parcel.
 
 ### Node definition:
 
 For each parcel:
 
-1. Extract all voxel-wise Jacobian determinant values from the nonlinear warp
-2. Build a normalized histogram or probability density estimate
-3. Represent the parcel as a probability distribution **P(x)**
+1. Extract all voxel-wise log-Jacobian determinant values from the nonlinear warp
+2. Sort the values and interpolate them onto a common 15-point quantile grid
+3. Use that quantile representation as the parcel distribution **P(x)**
 
 👉 Result:
 - Each parcel is described by its **full morphometric profile**, not just by one number
@@ -91,19 +91,15 @@ For each pair of parcels A and B, compute edges using:
 
 ### Edge construction details
 
-For each parcel pair:
-
-- compute **A conditioned on B**
-- compute **B conditioned on A**
-
-This keeps the pairwise comparison explicitly directional at the feature
-construction stage, even when later graph summaries are compared across
-subjects.
+For each pair of parcels A and B, compute the symmetric Wasserstein-1 distance
+between their common quantile representations. The resulting graph is
+undirected: $w_{AB} = w_{BA}$.
 
 ### Similarity convention
 
 - For **Wasserstein distance**, convert distance into a similarity score before
-  adding the edge to the graph.
+  adding the edge to the graph. The current transforms are $\exp(-W)$ and
+  $1/(1+W)$.
 - For **KL divergence (Gaussian version)**, use the divergence-derived pairwise
   comparison defined on Gaussian parcel summaries.
 - For **Median + IQR**, use robust summary-statistic comparisons rather than
@@ -140,25 +136,32 @@ respect to sparsification.
 For each graph, compute the **weighted degree** of every parcel:
 
 $$
-\mathrm{WeightedDegree}_i = \frac{\sum_j w_{ij}}{N}
+\mathrm{WeightedDegree}_i = \frac{\sum_{j \ne i} w_{ij}}{N-1}
 $$
 
 where:
 
 - $w_{ij}$ is the edge weight between parcel $i$ and parcel $j$
 - $N$ is the number of nodes in the graph
+- the diagonal self-similarity is excluded
 
 👉 Primary graph-level readout:
-- weighted degree = sum of edge weights / number of nodes
+- weighted degree = mean similarity to all other nodes
 
 ### Interpretation of weighted degree
 
 - High weighted degree means a parcel is morphometrically similar to many
   other parcels.
+- Low weighted degree means a parcel is unusual relative to the subject's
+  overall parcel population. It is an anomaly score, not a direct or specific
+  measurement of atrophy.
 - Diseased parcels are expected to be more atrophied and to show deformation
   patterns that deviate from the rest of the brain.
 - Therefore, diseased parcels are hypothesized to show **lower weighted
   degree** than healthy parcels.
+- Weighted degree depends on graph composition. Large compartments such as
+  cortex and CSF contribute many comparison nodes, so anatomical compartment
+  and parcel counts must be considered during group-level interpretation.
 
 ---
 
