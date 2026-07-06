@@ -148,6 +148,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def find_label_dirs(rois_dir: Path) -> list[Path]:
+    """Return all immediate subdirectories of rois_dir, sorted lexicographically."""
     label_dirs = sorted(path for path in rois_dir.iterdir() if path.is_dir())
     if not label_dirs:
         raise ValueError(f"No ROI label directories found under {rois_dir}")
@@ -155,6 +156,7 @@ def find_label_dirs(rois_dir: Path) -> list[Path]:
 
 
 def process_jacobian_paths(input_dir: Path) -> list[Path]:
+    """Glob Jacobian NIfTI files in input_dir (.nii.gz preferred over .nii)."""
     if not input_dir.is_dir():
         raise ValueError(f"Input directory does not exist: {input_dir}")
 
@@ -167,6 +169,7 @@ def process_jacobian_paths(input_dir: Path) -> list[Path]:
 
 
 def strip_nii_suffix(path: Path) -> str:
+    """Remove .nii.gz or .nii extension from a filename (Path.stem only strips the last dot)."""
     if path.name.endswith(".nii.gz"):
         return path.name[:-7]
     if path.suffix == ".nii":
@@ -175,6 +178,7 @@ def strip_nii_suffix(path: Path) -> str:
 
 
 def subject_id_from_jacobian_path(jacobian_path: Path) -> str:
+    """Extract a subject identifier from a Jacobian filename using known prefixes or BIDS tokens."""
     stem = strip_nii_suffix(jacobian_path)
     known_prefixes = (
         "subToMNI_relative_logJac_",
@@ -195,10 +199,12 @@ def subject_id_from_jacobian_path(jacobian_path: Path) -> str:
     return stem
 
 def count_parcels(label_dir: Path) -> int:
+    """Count roi_*.nii.gz files in a label directory."""
     return len(sorted(label_dir.glob("roi_*.nii.gz")))
 
 
 def choose_label_dirs(rois_dir: Path, explicit_label: int | None, min_parcels: int | None) -> list[Path]:
+    """Return the label directories to process, filtering by minimum parcel count when set."""
     if explicit_label is not None:
         label_dir = rois_dir / str(explicit_label)
         if not label_dir.is_dir():
@@ -209,7 +215,6 @@ def choose_label_dirs(rois_dir: Path, explicit_label: int | None, min_parcels: i
                 f"Requested label {explicit_label} only has {total} parcels, cannot select {min_parcels}"
             )
         return [label_dir]
-
     label_dirs = [
         label_dir
         for label_dir in find_label_dirs(rois_dir)
@@ -217,27 +222,24 @@ def choose_label_dirs(rois_dir: Path, explicit_label: int | None, min_parcels: i
     ]
     if label_dirs:
         return label_dirs
-
     if min_parcels is None:
         raise ValueError(f"No ROI label directories found under {rois_dir}")
     raise ValueError(f"No ROI label contains at least {min_parcels} parcels under {rois_dir}")
 
 
 def select_parcel_paths(label_dir: Path, n_parcels: int | None, sample_mode: str, seed: int) -> list[Path]:
-
+    """Pick parcel mask files from label_dir; returns all when n_parcels is None."""
     # Get all parcel paths and check if there are enough parcels to select from
     parcel_paths = sorted(label_dir.glob("roi_*.nii.gz"))
     if n_parcels is None:
         return parcel_paths
-
     if len(parcel_paths) < n_parcels:
         raise ValueError(
             f"Label {label_dir.name} only has {len(parcel_paths)} parcels, cannot select {n_parcels}"
         )
-
-    # Select the first N parcels or a random sample of N parcels based on the sample_mode
     if sample_mode == "random":
         rng = random.Random(seed)
+        # Sort after sampling so downstream processing order is deterministic
         return sorted(rng.sample(parcel_paths, n_parcels))
 
     return parcel_paths[:n_parcels]
@@ -252,19 +254,15 @@ def export_vectors(
 
     # Load the Jacobian image once and keep it in memory for all parcel processing
     jacobian_img = nib.load(str(jacobian_path))
-
     # Preload the Jacobian data into memory to avoid repeated disk access during masking
     jacobian_data = jacobian_img.get_fdata()
-
     output_dir.mkdir(parents=True, exist_ok=True)
-
     print(f"Loaded Jacobian image once from {jacobian_path}", flush=True)
     print(f"Writing .npy vectors to {output_dir}", flush=True)
     print(f"Worker threads: {num_workers}", flush=True)
 
     def export_single_parcel(index_and_path: tuple[int, Path]) -> tuple[int, str, tuple[int, ...]]:
         index, parcel_path = index_and_path
-
         # Load the parcel image and validate its shape and affine against the Jacobian image
         parcel_img = nib.load(str(parcel_path))
         if parcel_img.shape != jacobian_img.shape:
@@ -273,16 +271,12 @@ def export_vectors(
             )
         if not np.allclose(parcel_img.affine, jacobian_img.affine):
             raise ValueError(f"Affine mismatch for {parcel_path}")
-
         # Create a boolean mask where the parcel image has values greater than 0
         mask = parcel_img.get_fdata() > 0
-
         # Extract the Jacobian values at the masked locations and convert to float32 for efficient storage
         vector = jacobian_data[mask].astype(np.float32, copy=False)
-
         if vector.ndim != 1:
             raise ValueError(f"Expected a 1D masked vector for {parcel_path}, got shape {vector.shape}")
-
         # Save the extracted vector to a .npy file named after the parcel
         output_path = output_dir / f"{parcel_path.stem.replace('.nii', '')}.npy"
         np.save(output_path, vector)
@@ -304,6 +298,7 @@ def export_batch_vectors(
     output_root: Path,
     num_workers: int,
 ) -> None:
+    """Iterate over multiple Jacobian images and export parcel vectors for each subject."""
     total_subjects = len(jacobian_paths)
 
     for subject_index, jacobian_path in enumerate(jacobian_paths, start=1):
@@ -325,12 +320,10 @@ def export_batch_vectors(
 
 def main() -> None:
     args = parse_args()
-
     if args.n_parcels is not None and args.n_parcels < 1:
         raise ValueError("--n-parcels must be at least 1")
     if args.num_workers < 1:
         raise ValueError("--num-workers must be at least 1")
-
     label_dirs = choose_label_dirs(args.rois_dir, args.label, args.n_parcels)
     label_exports: list[tuple[int, list[Path]]] = []
     for label_dir in label_dirs:
@@ -338,14 +331,12 @@ def main() -> None:
         requested_count = args.n_parcels or count_parcels(label_dir)
         parcel_paths = select_parcel_paths(label_dir, requested_count, args.sample_mode, args.seed)
         label_exports.append((label, parcel_paths))
-
     if args.label is not None:
         label_name = LABEL_NAMES.get(args.label, "Unknown label")
         print(f"Selected label {args.label} ({label_name})", flush=True)
     else:
         print(f"Selected all ROI labels under {args.rois_dir}", flush=True)
         print(f"Label count: {len(label_exports)}", flush=True)
-
     print(f"Sample mode: {args.sample_mode}", flush=True)
     if args.n_parcels is None:
         print("Parcel count requested: all parcels in each selected label", flush=True)
@@ -354,7 +345,6 @@ def main() -> None:
     if args.sample_mode == "random":
         print(f"Random seed: {args.seed}", flush=True)
     print(f"Worker threads requested: {args.num_workers}", flush=True)
-
     if args.input_dir is not None:
         jacobian_paths = process_jacobian_paths(args.input_dir)
         print(f"Batch mode: found {len(jacobian_paths)} Jacobian images in {args.input_dir}", flush=True)
@@ -365,7 +355,6 @@ def main() -> None:
             num_workers=args.num_workers,
         )
         return
-
     subject_id = subject_id_from_jacobian_path(args.jacobian)
     print(f"Single-image mode subject ID: {subject_id}", flush=True)
     for label, parcel_paths in label_exports:

@@ -82,6 +82,7 @@ def parse_args():
 
 
 def six_connectivity_structure():
+    """Build the 3×3×3 binary structuring element for 6-connectivity (face-adjacent only)."""
     structure = np.zeros((3, 3, 3), dtype=np.uint8)
     structure[1, 1, 1] = 1
     structure[0, 1, 1] = 1
@@ -94,6 +95,7 @@ def six_connectivity_structure():
 
 
 def load_segmentation(segmentation_path):
+    """Load a segmentation NIfTI; casts float data to int64 when values are integer-valued."""
     template_img = nib.load(str(segmentation_path))
     seg_image = np.asanyarray(template_img.dataobj)
 
@@ -106,6 +108,7 @@ def load_segmentation(segmentation_path):
 
 
 def write_nifti(roi_indices, sub_roi_index, template_img, output_dir):
+    """Write voxel coordinates of one sub-parcel as a uint8 binary NIfTI mask."""
     roi_indices = np.asarray(roi_indices, dtype=np.int32)
     if roi_indices.size == 0:
         raise ValueError(f"Sub-parcel {sub_roi_index} is empty and will not be written")
@@ -121,6 +124,7 @@ def write_nifti(roi_indices, sub_roi_index, template_img, output_dir):
 
 
 def parcel_targets(n_voxels, n_parcels):
+    """Distribute n_voxels as evenly as possible across n_parcels, giving remainder to the first parcels."""
     base_size = n_voxels // n_parcels
     remainder = n_voxels % n_parcels
     targets = np.full(n_parcels, base_size, dtype=np.int32)
@@ -129,6 +133,7 @@ def parcel_targets(n_voxels, n_parcels):
 
 
 def allocate_parcels_to_components(component_sizes, parcel_size):
+    """Assign parcels to connected components proportionally, ensuring at least one per component."""
     n_components = len(component_sizes)
     total_voxels = int(component_sizes.sum())
     total_parcels = max(n_components, int(np.ceil(total_voxels / parcel_size)))
@@ -146,6 +151,7 @@ def allocate_parcels_to_components(component_sizes, parcel_size):
 
 
 def choose_seed_indices(coords, n_seeds):
+    """Select n_seeds voxel indices using a maximin spread: each seed maximises its distance from all prior seeds."""
     if n_seeds == 1:
         return np.array([0], dtype=np.int32)
 
@@ -166,6 +172,7 @@ def choose_seed_indices(coords, n_seeds):
 
 
 def build_adjacency(coords):
+    """Build a per-voxel adjacency list using 6-connectivity (face neighbors only)."""
     coord_to_index = {tuple(coord): idx for idx, coord in enumerate(coords.tolist())}
     adjacency = [[] for _ in range(len(coords))]
 
@@ -179,6 +186,7 @@ def build_adjacency(coords):
 
 
 def grow_connected_parcels(adjacency, targets, seeds):
+    """BFS region-growing from seeds: first respects per-parcel targets, then fills overflow voxels."""
     n_parcels = len(targets)
     owners = np.full(len(adjacency), -1, dtype=np.int32)
     parcel_sizes = np.zeros(n_parcels, dtype=np.int32)
@@ -214,6 +222,8 @@ def grow_connected_parcels(adjacency, targets, seeds):
                 frontiers[parcel_id].append(neighbor_index)
         return True
 
+    # Phase 1: expand parcels in order of their fill ratio (most underfilled first)
+    # until every parcel has reached its target or no further progress is possible.
     while np.any(owners == -1):
         progress = False
         deficit_order = np.argsort(parcel_sizes / targets)
@@ -227,6 +237,8 @@ def grow_connected_parcels(adjacency, targets, seeds):
         if np.all(parcel_sizes >= targets):
             break
 
+    # Phase 2: claim remaining unassigned voxels without size constraints,
+    # prioritising the smallest parcel to balance sizes as much as possible.
     while np.any(owners == -1):
         progress = False
         size_order = np.argsort(parcel_sizes)
@@ -247,10 +259,12 @@ def grow_connected_parcels(adjacency, targets, seeds):
 
 
 def build_parcel_members(owners, n_parcels):
+    """Return a list of sets where each set contains the voxel indices owned by that parcel."""
     return [set(np.flatnonzero(owners == parcel_id)) for parcel_id in range(n_parcels)]
 
 
 def parcel_adjacency(owners, adjacency, n_parcels):
+    """Return a list of sets of neighbouring parcel IDs for each parcel."""
     parcel_neighbors = [set() for _ in range(n_parcels)]
 
     for voxel_index, neighbors in enumerate(adjacency):
@@ -264,6 +278,7 @@ def parcel_adjacency(owners, adjacency, n_parcels):
 
 
 def is_connected_after_removal(members, remove_index, adjacency):
+    """Return True if the parcel stays connected when remove_index is removed (BFS check)."""
     if len(members) <= 1:
         return False
 
@@ -285,6 +300,7 @@ def is_connected_after_removal(members, remove_index, adjacency):
 
 
 def find_transfer_voxel(source_parcel, target_parcel, owners, parcel_members, adjacency):
+    """Find a boundary voxel in source_parcel that touches target_parcel and can be moved without disconnecting source."""
     candidates = []
     for voxel_index in parcel_members[source_parcel]:
         touch_target = any(owners[neighbor] == target_parcel for neighbor in adjacency[voxel_index])
@@ -301,6 +317,7 @@ def find_transfer_voxel(source_parcel, target_parcel, owners, parcel_members, ad
 
 
 def shortest_surplus_path(start_parcel, parcel_neighbors, parcel_sizes, targets):
+    """BFS over the parcel graph from start_parcel to the nearest parcel that has surplus voxels."""
     queue = deque([(start_parcel, [start_parcel])])
     visited = {start_parcel}
 
@@ -318,6 +335,7 @@ def shortest_surplus_path(start_parcel, parcel_neighbors, parcel_sizes, targets)
 
 
 def rebalance_connected_parcels(owners, adjacency, targets):
+    """Iteratively transfer boundary voxels along shortest paths to even out under-sized parcels."""
     n_parcels = len(targets)
     parcel_members = build_parcel_members(owners, n_parcels)
     parcel_sizes = np.array([len(members) for members in parcel_members], dtype=np.int32)
@@ -367,6 +385,7 @@ def rebalance_connected_parcels(owners, adjacency, targets):
 
 
 def grow_component(coords, n_parcels):
+    """Parcellate one connected component: seed → BFS grow → rebalance."""
     if n_parcels == 1:
         return np.zeros(len(coords), dtype=np.int32)
 
@@ -379,6 +398,7 @@ def grow_component(coords, n_parcels):
 
 
 def connected_subcomponents(coords):
+    """Count 6-connected components in a set of voxel coordinates (used for post-hoc QC)."""
     if len(coords) <= 1:
         return 1
 
@@ -406,6 +426,7 @@ def connected_subcomponents(coords):
 
 
 def check_neigh(roi_coords_in_voxel):
+    """Print a warning if the parcel voxels form more than one disconnected piece."""
     n_components = connected_subcomponents(roi_coords_in_voxel)
     if n_components > 1:
         print(

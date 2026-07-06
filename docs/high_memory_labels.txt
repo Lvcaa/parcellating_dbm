@@ -1,6 +1,4 @@
 # Labels deferred for separate preprocessing due to high RAM usage.
 # Format: one label per line, comments allowed.
-8
-16
-24
-47
+3
+42

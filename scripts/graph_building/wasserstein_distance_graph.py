@@ -1,3 +1,29 @@
+"""
+Build a dense Wasserstein similarity graph for one subject.
+
+Loads all parcel vectors under a subject folder, computes pairwise
+Wasserstein distances, converts them to similarities with exp(-W), and
+saves the adjacency matrix and weighted-degree vector as memmaps.
+
+Usage:
+    python scripts/graph_building/wasserstein_distance_graph.py (--input-folder PATH | --subject-id ID) [options]
+
+Parameters:
+    --input-folder PATH      Direct subject parcel-vector folder.
+    --input-root PATH        Subject-folder root (default: outputs/jacobian_parcel_vectors).
+    --subject-id TEXT        Folder name under --input-root when --input-folder is omitted.
+    --output-folder PATH     Custom graph output folder.
+    --num-workers INT        Parallel joblib workers (default: 4).
+    --progress-every INT     Progress interval in completed rows (default: 25).
+
+Outputs:
+    adjacency_matrix.dat, weighted_degree.dat, metadata.npy, parcel_order.txt
+
+Examples:
+    python scripts/graph_building/wasserstein_distance_graph.py --subject-id sub-0091
+    python scripts/graph_building/wasserstein_distance_graph.py --input-folder outputs/jacobian_parcel_vectors/sub-OAS30999 --num-workers 8
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -70,6 +96,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def resolve_subject_folder(input_folder: Path | None, input_root: Path, subject_id: str | None) -> tuple[Path, str]:
+    """Return (subject_folder, subject_id) from either an explicit path or a root+id pair."""
     if input_folder is not None:
         subject_folder = input_folder
         resolved_subject_id = subject_folder.name
@@ -86,6 +113,7 @@ def resolve_subject_folder(input_folder: Path | None, input_root: Path, subject_
 
 
 def load_subject_parcels(subject_folder: Path) -> tuple[list[str], list[np.ndarray]]:
+    """Load all .npy vectors from label_* subdirs; return (parcel_ids, vectors)."""
     label_dirs = sorted(path for path in subject_folder.iterdir() if path.is_dir() and path.name.startswith("label_"))
     if not label_dirs:
         raise ValueError(f"No label_* directories found under {subject_folder}")
@@ -115,6 +143,7 @@ def load_subject_parcels(subject_folder: Path) -> tuple[list[str], list[np.ndarr
 
 
 def allocate_empty_matrix(num_parcels: int) -> np.ndarray:
+    """Allocate a float64 similarity matrix with 1.0 on the diagonal (self-similarity)."""
     matrix = np.zeros((num_parcels, num_parcels), dtype=np.float64)
     np.fill_diagonal(matrix, 1.0)
     return matrix
@@ -124,6 +153,7 @@ def compute_row(
     i: int,
     all_parcels: list[np.ndarray],
 ) -> list[tuple[int, int, float]]:
+    """Compute exp(-W1) similarities between parcel i and all j > i (upper triangle only)."""
     wasserstein_similarities: list[tuple[int, int, float]] = []
 
     # Compute similarities for the upper triangle of the matrix (j > i)
@@ -137,6 +167,7 @@ def compute_row(
 
 
 def save_parcel_order(parcel_ids: list[str], output_path: Path) -> None:
+    """Write parcel IDs one per line so the matrix rows can be traced back to parcels."""
     output_path.write_text("\n".join(parcel_ids) + "\n", encoding="utf-8")
 
 
@@ -190,12 +221,13 @@ def main() -> None:
     if num_parcels == 1:
         weighted_degree = np.zeros((1,), dtype=np.float64)
     else:
-        # Computed as the average similarity to all other parcels (excluding self-similarity)
+        # Subtract 1.0 to remove the self-similarity on the diagonal before averaging.
         weighted_degree = (np.sum(matrix, axis=1) - 1.0) / (num_parcels - 1)
 
     out_dir = args.output_folder if args.output_folder is not None else DEFAULT_OUTPUT_ROOT / subject_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    # Use memmaps so the adjacency matrix is never fully loaded into RAM by readers.
     mm_matrix = np.memmap(
         out_dir / "adjacency_matrix.dat",
         dtype="float64",
@@ -203,7 +235,7 @@ def main() -> None:
         shape=(num_parcels, num_parcels),
     )
     mm_matrix[:] = matrix
-    del mm_matrix
+    del mm_matrix  # flush to disk
 
     mm_degree = np.memmap(
         out_dir / "weighted_degree.dat",
@@ -212,7 +244,7 @@ def main() -> None:
         shape=(num_parcels,),
     )
     mm_degree[:] = weighted_degree
-    del mm_degree
+    del mm_degree  # flush to disk
 
     np.save(out_dir / "metadata.npy", np.array([num_parcels], dtype=np.int64))
     save_parcel_order(parcel_ids, out_dir / "parcel_order.txt")

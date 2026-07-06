@@ -128,6 +128,7 @@ def parse_args() -> argparse.Namespace:
 def resolve_subject_folder(
     input_folder: Path | None, input_root: Path, subject_id: str | None
 ) -> tuple[Path, str]:
+    """Return (subject_folder, subject_id) from either an explicit path or a root+id pair."""
     if input_folder is not None:
         subject_folder = input_folder
         resolved_subject_id = subject_folder.name
@@ -144,6 +145,7 @@ def resolve_subject_folder(
 
 
 def default_output_root(sim_formula: int) -> Path:
+    """Return the formula-specific output root, e.g. outputs/wasserstein_graphs_expW."""
     formula_name = SIM_FORMULA_OUTPUT_NAMES[sim_formula]
     return PROJECT_ROOT / "outputs" / f"wasserstein_graphs_{formula_name}"
 
@@ -229,6 +231,7 @@ def _compute_block(
 
 
 def save_parcel_order(parcel_ids: list[str], output_path: Path) -> None:
+    """Write parcel IDs one per line so matrix rows can be traced back to parcels."""
     output_path.write_text("\n".join(parcel_ids) + "\n", encoding="utf-8")
 
 
@@ -293,7 +296,7 @@ def main() -> None:
     for completed, (i_start, i_end, sim_block) in enumerate(results, start=1):
         mm_matrix[i_start:i_end, :] = sim_block
         mm_matrix[:, i_start:i_end] = sim_block.T
-        # accumulate weighted degree for these rows
+        # Subtract 1.0 to exclude the self-similarity on the diagonal before averaging.
         weighted_degree[i_start:i_end] = (sim_block.sum(axis=1) - 1.0) / (N - 1)
 
         if completed % args.progress_every == 0 or completed == num_blocks:

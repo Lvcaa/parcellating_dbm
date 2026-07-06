@@ -1,26 +1,28 @@
 """
-Run ANTs nonlinear registration and compute a Jacobian determinant image.
+Compute log-Jacobian determinant images for all subjects in DATASET_DIR.
+
+For each subject the script looks for an existing warp (_SyN1Warp.nii.gz).
+If the warp is present, registration is skipped and only the log-Jacobian is
+computed. If the warp is missing and --fixed-image is provided, a full ANTs
+registration is run first.  Subjects whose log-Jacobian already exists are
+skipped entirely.
 
 ANTs must be installed with ``antsRegistrationSyNQuick.sh`` and
-``CreateJacobianDeterminantImage`` available in ``PATH``. Outputs are written
-under ``<output-root>/<subject-id>/``.
+``CreateJacobianDeterminantImage`` available in PATH.
 
 Usage:
-    python scripts/registration/run_ants_jacobian.py --fixed-image PATH [options]
+    python scripts/registration/run_ants_jacobian.py [options]
 
 Parameters:
-    --fixed-image PATH       Required reference image in target space.
-    --moving-image PATH      Subject T1 image to register.
-    --output-root PATH       ANTs output root (default: outputs/ants_registration).
-    --subject-id TEXT        Optional output-folder ID; inferred when omitted.
-    --dimension {2,3}        Image dimensionality (default: 3).
-    --transform-type TYPE    ANTs transform type: t, r, a, s, sr, so, or b.
-    --threads INT            ITK thread count (default: 1).
-    --write-raw-jacobian     Also write the raw Jacobian image.
+    --fixed-image PATH   MNI reference image (required only when warp is missing).
+    --threads INT        ITK thread count (default: 1).
+    --dimension {2,3}    Image dimensionality (default: 3).
+    --transform-type     ANTs transform type (default: s).
 
 Examples:
-    python scripts/registration/run_ants_jacobian.py --fixed-image data/reference/MNI152_T1_1mm.nii.gz
-    python scripts/registration/run_ants_jacobian.py --fixed-image data/reference/MNI152_T1_1mm.nii.gz --moving-image data/subjects/sub-0006_T1w.nii.gz --subject-id sub-0006 --threads 8 --write-raw-jacobian
+    python scripts/registration/run_ants_jacobian.py
+    python scripts/registration/run_ants_jacobian.py --threads 8
+    python scripts/registration/run_ants_jacobian.py --fixed-image data/reference/MNI152_T1_1mm.nii.gz --threads 8
 """
 
 from __future__ import annotations
@@ -29,69 +31,46 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MOVING_IMAGE = PROJECT_ROOT / "data" / "reference" / "sub-0091_ses-V01_T1w.nii.gz"
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "ants_registration"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import const
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run ANTs nonlinear registration for one T1 image and compute a "
-            "Jacobian determinant image from the resulting warp."
+            "Compute log-Jacobian images for all subjects in DATASET_DIR. "
+            "Skips subjects whose log-Jacobian already exists. "
+            "Skips registration when the warp is already present."
         )
     )
     parser.add_argument(
         "--fixed-image",
         type=Path,
-        required=True,
-        help="Reference image in target space, typically an MNI T1 template.",
-    )
-    parser.add_argument(
-        "--moving-image",
-        type=Path,
-        default=DEFAULT_MOVING_IMAGE,
-        help=f"Subject T1 image to register (default: {DEFAULT_MOVING_IMAGE}).",
-    )
-    parser.add_argument(
-        "--output-root",
-        type=Path,
-        default=DEFAULT_OUTPUT_ROOT,
-        help=f"Directory where ANTs outputs will be written (default: {DEFAULT_OUTPUT_ROOT}).",
-    )
-    parser.add_argument(
-        "--subject-id",
-        type=str,
         default=None,
-        help="Optional subject identifier used in the output folder name.",
+        help="MNI reference image used for registration (only needed if warp is missing).",
+    )
+    parser.add_argument(
+        "--threads",
+        type=int,
+        default=1,
+        help="Number of ITK threads (default: 1).",
     )
     parser.add_argument(
         "--dimension",
         type=int,
         default=3,
         choices=(2, 3),
-        help="Image dimensionality passed to ANTs (default: 3).",
+        help="Image dimensionality (default: 3).",
     )
     parser.add_argument(
         "--transform-type",
         type=str,
         default="s",
         choices=("t", "r", "a", "s", "sr", "so", "b"),
-        help="Transform type for antsRegistrationSyNQuick.sh (default: s).",
-    )
-    parser.add_argument(
-        "--threads",
-        type=int,
-        default=1,
-        help="Number of ITK threads to use (default: 1).",
-    )
-    parser.add_argument(
-        "--write-raw-jacobian",
-        action="store_true",
-        help="Also write the raw Jacobian determinant image in addition to log-Jacobian.",
+        help="ANTs transform type (default: s).",
     )
     return parser.parse_args()
 
@@ -106,92 +85,127 @@ def resolve_executable(name: str) -> str:
     return executable
 
 
-def validate_input_image(path: Path, label: str) -> None:
-    if not path.is_file():
-        raise FileNotFoundError(f"{label} does not exist: {path}")
-
-
-def infer_subject_id(moving_image: Path) -> str:
-    name = moving_image.name
-    if name.endswith(".nii.gz"):
-        return name[:-7]
-    if moving_image.suffix == ".nii":
-        return moving_image.stem
-    return moving_image.stem
-
-
 def run_command(command: list[str], env: dict[str, str]) -> None:
     print("Running:", " ".join(command), flush=True)
     subprocess.run(command, check=True, env=env)
 
 
+def run_registration(
+    subject_dir: Path,
+    fixed_image: Path,
+    moving_image: Path,
+    transform_type: str,
+    dimension: int,
+    env: dict[str, str],
+) -> Path:
+    """Run ANTs registration and return the warp path."""
+    ants_registration = resolve_executable("antsRegistrationSyNQuick.sh")
+    output_prefix = subject_dir / "_SyN"
+    warp_path = subject_dir / WARP_FILENAME
+    run_command(
+        [
+            ants_registration,
+            "-d", str(dimension),
+            "-f", str(fixed_image),
+            "-m", str(moving_image),
+            "-t", transform_type,
+            "-o", str(output_prefix),
+        ],
+        env,
+    )
+    if not warp_path.is_file():
+        raise FileNotFoundError(f"ANTs warp not produced: {warp_path}")
+    return warp_path
+
+
+def compute_log_jacobian(
+    warp_path: Path,
+    log_jacobian_path: Path,
+    dimension: int,
+    env: dict[str, str],
+) -> None:
+    """Compute the log-Jacobian determinant from a warp field."""
+    jacobian_tool = resolve_executable("CreateJacobianDeterminantImage")
+    # "1" = log transform, "0" = geometric only (excludes affine component)
+    run_command(
+        [
+            jacobian_tool,
+            str(dimension),
+            str(warp_path),
+            str(log_jacobian_path),
+            "1",
+            "0",
+        ],
+        env,
+    )
+
+
+def process_subject(
+    subject_dir: Path,
+    args: argparse.Namespace,
+    env: dict[str, str],
+) -> str:
+    """
+    Process one subject. Returns a status string: 'skipped', 'jacobian_only', or 'full'.
+    """
+    log_jacobian_path = subject_dir / LOG_JACOBIAN_FILENAME
+    warp_path         = subject_dir / WARP_FILENAME
+
+    if log_jacobian_path.exists():
+        return "skipped"
+
+    if not warp_path.exists():
+        if args.fixed_image is None:
+            print(
+                f"  [WARNING] Warp missing and --fixed-image not provided, skipping.",
+                flush=True,
+            )
+            return "skipped"
+        moving_image = subject_dir / f"{subject_dir.name}_T1w.nii.gz"
+        if not moving_image.is_file():
+            print(
+                f"  [WARNING] Warp missing and no T1w found at {moving_image}, skipping.",
+                flush=True,
+            )
+            return "skipped"
+        warp_path = run_registration(
+            subject_dir, args.fixed_image, moving_image,
+            args.transform_type, args.dimension, env,
+        )
+        compute_log_jacobian(warp_path, log_jacobian_path, args.dimension, env)
+        return "full"
+
+    compute_log_jacobian(warp_path, log_jacobian_path, args.dimension, env)
+    return "jacobian_only"
+
+
 def main() -> None:
     args = parse_args()
 
-    validate_input_image(args.fixed_image, "Fixed image")
-    validate_input_image(args.moving_image, "Moving image")
-
-    ants_registration = resolve_executable("antsRegistrationSyNQuick.sh")
-    jacobian_tool = resolve_executable("CreateJacobianDeterminantImage")
-
-    subject_id = args.subject_id or infer_subject_id(args.moving_image)
-    subject_output_dir = args.output_root / subject_id
-    subject_output_dir.mkdir(parents=True, exist_ok=True)
-
-    output_prefix = subject_output_dir / f"{subject_id}_to_template_"
-    warp_path = subject_output_dir / f"{subject_id}_to_template_1Warp.nii.gz"
-    log_jacobian_path = subject_output_dir / f"{subject_id}_to_template_logJacobian.nii.gz"
-    raw_jacobian_path = subject_output_dir / f"{subject_id}_to_template_jacobian.nii.gz"
+    if args.fixed_image is not None and not args.fixed_image.is_file():
+        raise FileNotFoundError(f"Fixed image not found: {args.fixed_image}")
 
     env = dict(os.environ)
     env["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(args.threads)
 
-    registration_command = [
-        ants_registration,
-        "-d",
-        str(args.dimension),
-        "-f",
-        str(args.fixed_image),
-        "-m",
-        str(args.moving_image),
-        "-t",
-        args.transform_type,
-        "-o",
-        str(output_prefix),
-    ]
-    run_command(registration_command, env)
+    subject_dirs = sorted(
+        d for d in const.DATASET_DIR.iterdir()
+        if d.is_dir() and d.name.startswith("sub-")
+    )
+    total = len(subject_dirs)
+    counts = {"skipped": 0, "jacobian_only": 0, "full": 0}
 
-    if not warp_path.is_file():
-        raise FileNotFoundError(
-            f"Expected ANTs warp was not created: {warp_path}"
-        )
+    for i, subject_dir in enumerate(subject_dirs, start=1):
+        print(f"[{i:04d}/{total}] {subject_dir.name}", flush=True)
+        status = process_subject(subject_dir, args, env)
+        counts[status] += 1
+        print(f"  -> {status}", flush=True)
 
-    log_jacobian_command = [
-        jacobian_tool,
-        str(args.dimension),
-        str(warp_path),
-        str(log_jacobian_path),
-        "1",
-        "0",
-    ]
-    run_command(log_jacobian_command, env)
-
-    if args.write_raw_jacobian:
-        raw_jacobian_command = [
-            jacobian_tool,
-            str(args.dimension),
-            str(warp_path),
-            str(raw_jacobian_path),
-            "0",
-            "0",
-        ]
-        run_command(raw_jacobian_command, env)
-
-    print(f"Registration output folder: {subject_output_dir}", flush=True)
-    print(f"Warp field: {warp_path}", flush=True)
-    print(f"Log-Jacobian image: {log_jacobian_path}", flush=True)
-    if args.write_raw_jacobian:
-        print(f"Raw Jacobian image: {raw_jacobian_path}", flush=True)
+    print(
+        f"\nDone. jacobian_only={counts['jacobian_only']}  "
+        f"full={counts['full']}  skipped={counts['skipped']}",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

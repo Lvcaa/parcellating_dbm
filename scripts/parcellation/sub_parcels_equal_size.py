@@ -10,8 +10,8 @@ Usage:
 Parameters:
     --roi-label INT          Segmentation label to split (default: 10).
     --parcel-size INT        Target voxels per parcel (default: 27).
-    --segmentation PATH      Input segmentation image.
-    --output-root PATH       Root for ROI-specific folders (default: outputs/rois).
+    --segmentation PATH      Input segmentation image (default: const.SEGMENTATION_PATH).
+    --output-root PATH       Root for ROI-specific folders (default: const.ROIS_DIR).
     --skip-neighbor-check    Skip local connectivity diagnostics.
 
 Examples:
@@ -21,6 +21,7 @@ Examples:
 """
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
@@ -34,10 +35,9 @@ from sklearn.cluster import AgglomerativeClustering
 from sklearn.feature_extraction import image
 from sklearn.neighbors import NearestCentroid
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import const
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_SEGMENTATION = PROJECT_ROOT / "data" / "reference" / "MNI152_T1_1mm_seg.nii.gz"
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "rois"
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -58,14 +58,14 @@ def parse_args():
     parser.add_argument(
         "--segmentation",
         type=Path,
-        default=DEFAULT_SEGMENTATION,
-        help="Path to the input segmentation image.",
+        default=const.SEGMENTATION_PATH,
+        help=f"Path to the input segmentation image (default: {const.SEGMENTATION_PATH}).",
     )
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=DEFAULT_OUTPUT_ROOT,
-        help="Directory where ROI-specific parcel folders will be written.",
+        default=const.ROIS_DIR,
+        help=f"Directory where ROI-specific parcel folders will be written (default: {const.ROIS_DIR}).",
     )
     parser.add_argument(
         "--skip-neighbor-check",
@@ -76,21 +76,17 @@ def parse_args():
 
 
 def write_nifti(roi_indices, sub_roi_index, template_img, output_dir):
-
-    # Create an empty image and set the voxels corresponding to the current sub-parcel to 1
+    """Write the voxel coordinates of one sub-parcel as a binary NIfTI mask."""
     empty_image = np.zeros(template_img.shape, dtype=np.uint8)
-
-    # roi_indices is in (x, y, z) format, so we can directly index into the empty image
     for ii in roi_indices:
         empty_image[ii[0], ii[1], ii[2]] = 1
-
-    # Create a NIfTI image and save it
     nii_ = nib.Nifti1Image(empty_image, affine=template_img.affine, header=template_img.header)
     output_path = output_dir / f"roi_{sub_roi_index:04d}.nii.gz"
     nii_.to_filename(str(output_path))
 
 
 def check_neigh(roi_coords_in_voxel):
+    """Warn if any voxel in the parcel has no face-adjacent neighbor within the same parcel."""
     for ii_index, ii in enumerate(roi_coords_in_voxel):
         roi_coords_in_voxel_copy = roi_coords_in_voxel.copy()
         roi_coords_in_voxel_copy = np.delete(roi_coords_in_voxel_copy, ii_index, axis=0)
@@ -101,41 +97,23 @@ def check_neigh(roi_coords_in_voxel):
 
 def main():
     args = parse_args()
-
     if args.parcel_size < 1:
         raise ValueError("--parcel-size must be at least 1")
 
-    # Load the segmentation image and extract the coordinates of the voxels 
-    # belonging to the specified ROI label
     template_img = nib.load(str(args.segmentation))
-    
-    # Get the segmentation data as a numpy array
     seg_image = template_img.get_fdata()
-
-    # Extract the coordinates of the voxels that belong to the specified ROI label
     roi_coord = np.vstack(np.where(seg_image == args.roi_label)).T
     if roi_coord.size == 0:
         raise ValueError(f"ROI label {args.roi_label} not found in {args.segmentation}")
 
-    # Calculate the number of clusters needed to achieve the desired parcel size
     n_clust = int(np.ceil(len(roi_coord) / args.parcel_size))
-
-    # Create a connectivity graph for the voxels 
-    # in the ROI to ensure that sub-parcels are spatially contiguous
-    
-    # Create a binary mask for the ROI and use it to compute the connectivity graph
     roi_mask = (seg_image == args.roi_label).astype(np.uint8)
-    
-    # The grid_to_graph function creates a sparse matrix 
-    # where each row corresponds to a voxel in the ROI and 
-    # each column corresponds to a neighboring voxel.
     conn = image.grid_to_graph(
         n_x=roi_mask.shape[0],
         n_y=roi_mask.shape[1],
         n_z=roi_mask.shape[2],
         mask=roi_mask,
     )
-
     graph = csr_matrix(conn)
     n_components, labels = connected_components(csgraph=graph, directed=False, return_labels=True)
     component_sizes = np.bincount(labels)
@@ -152,7 +130,9 @@ def main():
     clf = NearestCentroid()
     clf.fit(roi_coord, labels_clust)
     centroids = clf.centroids_
-
+    # Each centroid is replicated parcel_size times to create a "slot" matrix.
+    # linear_sum_assignment assigns each voxel to exactly one slot;
+    # dividing the slot index by parcel_size recovers the cluster ID.
     centers = (
         centroids.reshape(-1, 1, roi_coord.shape[-1])
         .repeat(args.parcel_size, 1)
@@ -166,9 +146,7 @@ def main():
 
     output_dir = args.output_root / str(args.roi_label)
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    unique_labels = np.unique(clusters)
-    for ii_index, ii in enumerate(unique_labels):
+    for ii_index, ii in enumerate(np.unique(clusters)):
         dummy = np.where(clusters == ii)[0]
         if not args.skip_neighbor_check:
             check_neigh(roi_coord[dummy])

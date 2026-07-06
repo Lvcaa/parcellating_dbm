@@ -4,3 +4,4 @@ outputs/
 containers/parcellating_dbm.def
 parcellation-test.tar
 .claude/
+data/
