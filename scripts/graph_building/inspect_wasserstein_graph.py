@@ -103,6 +103,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def load_graph(graph_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Memory-map adjacency_matrix.dat and weighted_degree.dat from a graph directory."""
     metadata_path = graph_dir / "metadata.npy"
     matrix_path = graph_dir / "adjacency_matrix.dat"
     degree_path = graph_dir / "weighted_degree.dat"
@@ -128,6 +129,7 @@ def load_graph(graph_dir: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def load_label_vectors(vectors_root: Path, labels: list[int]) -> tuple[list[np.ndarray], list[str]]:
+    """Load all roi_*.npy vectors for the given labels and return (vectors, parcel_names)."""
     parcel_vectors: list[np.ndarray] = []
     parcel_names: list[str] = []
 
@@ -148,6 +150,7 @@ def load_label_vectors(vectors_root: Path, labels: list[int]) -> tuple[list[np.n
 
 
 def build_merged_graph(parcel_vectors: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+    """Build an in-memory exp(-W1) similarity matrix and compute weighted degree; serial, for small inputs."""
     n_parcels = len(parcel_vectors)
     if n_parcels < 1:
         raise ValueError("At least one parcel vector is required to build a graph.")
@@ -170,6 +173,7 @@ def build_merged_graph(parcel_vectors: list[np.ndarray]) -> tuple[np.ndarray, np
 
 
 def format_stats(matrix: np.ndarray, weighted_degree: np.ndarray) -> list[str]:
+    """Return a list of sanity-check strings (symmetry, value range, finiteness)."""
     diag = np.diag(matrix)
     symmetry_max_abs_diff = float(np.max(np.abs(matrix - matrix.T)))
     matrix_min = float(np.min(matrix))
@@ -190,6 +194,7 @@ def format_stats(matrix: np.ndarray, weighted_degree: np.ndarray) -> list[str]:
 
 
 def print_top_edges(matrix: np.ndarray, top_k: int) -> None:
+    """Print the top_k highest off-diagonal similarity values with their (i, j) indices."""
     n_parcels = matrix.shape[0]
     if n_parcels < 2 or top_k < 1:
         return
@@ -208,6 +213,7 @@ def print_top_edges(matrix: np.ndarray, top_k: int) -> None:
 
 
 def print_label_summary(parcel_names: list[str]) -> None:
+    """Print how many parcels were loaded from each label directory."""
     if not parcel_names:
         return
 
@@ -222,6 +228,7 @@ def print_label_summary(parcel_names: list[str]) -> None:
 
 
 def plot_heatmap(matrix: np.ndarray) -> plt.Figure:
+    """Render the full adjacency matrix as a heatmap (mako colormap, range [0, 1])."""
     sns.set_theme(style="white")
     fig, ax = plt.subplots(figsize=(9, 8))
     sns.heatmap(
@@ -241,6 +248,7 @@ def plot_heatmap(matrix: np.ndarray) -> plt.Figure:
 
 
 def plot_weighted_degree(weighted_degree: np.ndarray) -> plt.Figure:
+    """Histogram of the weighted-degree distribution across parcels."""
     sns.set_theme(style="whitegrid")
     fig, ax = plt.subplots(figsize=(8, 4))
     sns.histplot(np.asarray(weighted_degree), bins=20, kde=True, ax=ax, color="#4C72B0")

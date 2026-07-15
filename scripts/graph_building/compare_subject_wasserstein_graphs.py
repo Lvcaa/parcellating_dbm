@@ -159,10 +159,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def default_graph_root(sim_formula: str) -> Path:
+    """Return the formula-specific graph root, e.g. outputs/wasserstein_graphs_expW."""
     return DEFAULT_OUTPUT_ROOT / f"wasserstein_graphs_{sim_formula}"
 
 
 def resolve_graph_dirs(args: argparse.Namespace) -> tuple[Path, Path]:
+    """Return (healthy_dir, atrophy_dir) from either explicit paths or subject-id + formula."""
     if args.healthy_dir is not None or args.atrophy_dir is not None:
         if args.healthy_dir is None or args.atrophy_dir is None:
             raise ValueError("Provide both --healthy-dir and --atrophy-dir, or neither.")
@@ -179,6 +181,7 @@ def resolve_graph_dirs(args: argparse.Namespace) -> tuple[Path, Path]:
 
 
 def default_output_dir(healthy_dir: Path, atrophy_dir: Path) -> Path:
+    """Infer output directory; places it next to the inputs when they share a parent."""
     h_name = healthy_dir.name
     a_name = atrophy_dir.name
     if healthy_dir.parent == atrophy_dir.parent:
@@ -191,6 +194,7 @@ def default_output_dir(healthy_dir: Path, atrophy_dir: Path) -> Path:
 # ---------------------------------------------------------------------------
 
 def load_parcel_order(graph_dir: Path) -> list[str]:
+    """Read parcel_order.txt and return the list of parcel IDs in matrix row order."""
     path = graph_dir / "parcel_order.txt"
     if not path.is_file():
         raise ValueError(f"Missing parcel_order.txt: {path}")
@@ -203,6 +207,7 @@ def load_parcel_order(graph_dir: Path) -> list[str]:
 
 
 def load_weighted_degree(graph_dir: Path, n_parcels: int) -> np.ndarray:
+    """Memory-map weighted_degree.dat as a read-only float64 array of length n_parcels."""
     path = graph_dir / "weighted_degree.dat"
     if not path.is_file():
         raise ValueError(f"Missing weighted_degree.dat: {path}")
@@ -221,6 +226,7 @@ def load_weighted_degree(graph_dir: Path, n_parcels: int) -> np.ndarray:
 
 
 def resolve_adjacency_dtype(path: Path, n_parcels: int, requested_dtype: str) -> str:
+    """Infer float32 vs float64 from file size when requested_dtype is 'auto'."""
     if requested_dtype != "auto":
         return requested_dtype
 
@@ -240,6 +246,7 @@ def resolve_adjacency_dtype(path: Path, n_parcels: int, requested_dtype: str) ->
 
 
 def load_label_lookup(csv_path: Path) -> dict[int, str]:
+    """Load label_lookup.csv and return {label_number: label_name}."""
     lookup: dict[int, str] = {}
     with csv_path.open(encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
@@ -317,6 +324,7 @@ def compute_label_stats(
     delta: np.ndarray,
     lookup: dict[int, str],
 ) -> list[dict]:
+    """Aggregate per-parcel degree deltas by anatomical label; returns list sorted by mean delta."""
     groups: dict[int, list[float]] = defaultdict(list)
     for pid, d in zip(parcel_ids, delta):
         groups[_label_number(pid)].append(float(d))
@@ -354,6 +362,7 @@ def write_summary(
     label_stats: list[dict],
     top_k: int,
 ) -> None:
+    """Write comparison_summary.txt with degree stats, top-K drop parcels, and label breakdown."""
     corr = float(np.corrcoef(degree_h, degree_a)[0, 1])
     lines = [
         f"Healthy graph: {healthy_dir}",
@@ -399,6 +408,7 @@ def plot_degree_scatter(
     degree_a: np.ndarray,
     output_dir: Path,
 ) -> plt.Figure:
+    """Scatter plot of healthy vs atrophy weighted degree; identity line as reference."""
     sns.set_theme(style="whitegrid")
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.scatter(
@@ -420,6 +430,7 @@ def plot_degree_scatter(
 
 
 def plot_delta_hist(delta: np.ndarray, output_dir: Path) -> plt.Figure:
+    """Histogram of per-parcel degree delta (diseased − healthy)."""
     sns.set_theme(style="whitegrid")
     fig, ax = plt.subplots(figsize=(8, 4))
     sns.histplot(np.asarray(delta), bins=60, kde=True, ax=ax, color="#DD8452")
@@ -433,6 +444,7 @@ def plot_delta_hist(delta: np.ndarray, output_dir: Path) -> plt.Figure:
 
 
 def plot_label_bar(label_stats: list[dict], output_dir: Path) -> plt.Figure:
+    """Horizontal bar chart of mean degree delta per anatomical label; negative = drop."""
     names = [s["label_name"] for s in label_stats]
     means = [s["mean"] for s in label_stats]
 
@@ -454,6 +466,7 @@ def plot_submatrix_comparison(
     n_parcels: int,
     output_dir: Path,
 ) -> plt.Figure:
+    """Three-panel heatmap: healthy submatrix, atrophy submatrix, and their difference."""
     sns.set_theme(style="white")
     fig, axes = plt.subplots(1, 3, figsize=(21, 6))
 
