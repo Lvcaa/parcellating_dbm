@@ -28,7 +28,7 @@ import pandas as pd
 from scipy import stats
 
 CSV_PATH = (
-    "/home/lucagalli/Projects/Parkinson_Population_Model/"
+    "/home/lucagalli/Projects/OASIS3_Pipeline_Luca/Parkinson_Population_Model/"
     "OASIS3_data_files/scans/FS-Freesurfer_output/resources/csv/files/"
     "OASIS3_Freesurfer_output.csv"
 )

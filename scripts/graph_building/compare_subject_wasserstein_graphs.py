@@ -19,6 +19,7 @@ Parameters:
     --top-k INT                 Summary parcel count (default: 25).
     --submatrix-k INT           Plot submatrix size (default: 50).
     --adjacency-dtype TYPE      auto, float32, or float64 (default: auto).
+    --allow-partial-parcels     Compare only intersecting parcel IDs.
     --show                      Display figures interactively after saving.
 
 Examples:
@@ -142,6 +143,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--allow-partial-parcels",
+        action="store_true",
+        help=(
+            "Allow subjects with different parcel sets and compare their "
+            "intersection. By default, parcel sets must match exactly."
+        ),
+    )
+    parser.add_argument(
         "--show",
         action="store_true",
         help="Show figures interactively after saving.",
@@ -185,14 +194,30 @@ def load_parcel_order(graph_dir: Path) -> list[str]:
     path = graph_dir / "parcel_order.txt"
     if not path.is_file():
         raise ValueError(f"Missing parcel_order.txt: {path}")
-    return path.read_text(encoding="utf-8").splitlines()
+    parcel_order = path.read_text(encoding="utf-8").splitlines()
+    if not parcel_order:
+        raise ValueError(f"Parcel order is empty: {path}")
+    if len(set(parcel_order)) != len(parcel_order):
+        raise ValueError(f"Parcel order contains duplicate IDs: {path}")
+    return parcel_order
 
 
 def load_weighted_degree(graph_dir: Path, n_parcels: int) -> np.ndarray:
     path = graph_dir / "weighted_degree.dat"
     if not path.is_file():
         raise ValueError(f"Missing weighted_degree.dat: {path}")
-    return np.memmap(path, dtype="float64", mode="r", shape=(n_parcels,))
+    expected_size = n_parcels * np.dtype("float64").itemsize
+    if path.stat().st_size != expected_size:
+        raise ValueError(
+            f"Unexpected weighted-degree file size for {path}: "
+            f"got {path.stat().st_size}, expected {expected_size}"
+        )
+    degree = np.memmap(path, dtype="float64", mode="r", shape=(n_parcels,))
+    if not np.isfinite(degree).all():
+        raise ValueError(f"Weighted degree contains non-finite values: {path}")
+    if np.any(degree <= 0.0) or np.any(degree > 1.0):
+        raise ValueError(f"Weighted degree contains values outside (0, 1]: {path}")
+    return degree
 
 
 def resolve_adjacency_dtype(path: Path, n_parcels: int, requested_dtype: str) -> str:
@@ -446,8 +471,7 @@ def plot_submatrix_comparison(
     sns.heatmap(sub_a, ax=axes[1], **shared_kws)
     axes[1].set_title("Atrophy — top-K submatrix")
 
-    # The difference is computed as healthy minus atrophy,
-    # so negative values indicate a drop in similarity.
+    # Positive values mean similarity is lower in atrophy.
     diff = sub_h - sub_a
     
     abs_max = float(np.abs(diff).max()) or 1.0
@@ -456,7 +480,7 @@ def plot_submatrix_comparison(
         cmap="RdBu", vmin=-abs_max, vmax=abs_max,
         square=True, xticklabels=False, yticklabels=False,
     )
-    axes[2].set_title("Diff (healthy − atrophy)")
+    axes[2].set_title("Healthy - atrophy (positive = lower in atrophy)")
 
     fig.suptitle(
         f"Top-{n_parcels} degree-drop parcels: adjacency submatrix comparison",
@@ -481,6 +505,11 @@ def main() -> None:
     # Step 1 — load parcel orders and build a shared aligned index
     order_h = load_parcel_order(healthy_dir)
     order_a = load_parcel_order(atrophy_dir)
+    if set(order_h) != set(order_a) and not args.allow_partial_parcels:
+        raise ValueError(
+            "Parcel sets differ between subjects. Rebuild them from the same "
+            "parcellation or pass --allow-partial-parcels to compare only the intersection."
+        )
     idx_h, idx_a, parcel_ids = align_parcel_orders(order_h, order_a)
 
     n_h = len(order_h)

@@ -1,0 +1,1 @@
+Valutare come analisi esplorativa secondaria il clustering dei parcel su embedding del grafo ottenuti tramite graph convolution o graph diffusion, dopo sparsificazione. Confrontare la stabilità dei cluster tra soggetti sani e patologici.

@@ -1,12 +1,20 @@
 #!/bin/bash
 set -euo pipefail
 
-if [ "$#" -ne 1 ]; then
-    echo "Usage: bash scripts/run_jacobian_wasserstein_pipeline.sh <moving_image.nii.gz>" >&2
+if [ "$#" -ne 1 ] && [ "$#" -ne 3 ]; then
+    echo "Usage: bash scripts/run_jacobian_wasserstein_pipeline.sh <moving_image.nii.gz> [--sim-formula {1,2}]" >&2
     exit 1
 fi
 
 MOVING_IMAGE="$1"
+SIM_FORMULA=""
+if [ "$#" -eq 3 ]; then
+    if [ "$2" != "--sim-formula" ] || { [ "$3" != "1" ] && [ "$3" != "2" ]; }; then
+        echo "Error: expected --sim-formula followed by 1 or 2" >&2
+        exit 1
+    fi
+    SIM_FORMULA="$3"
+fi
 if [ ! -f "$MOVING_IMAGE" ]; then
     echo "Error: moving image does not exist: $MOVING_IMAGE" >&2
     exit 1
@@ -84,19 +92,23 @@ if [ ! -d "$PARCEL_SUBJECT_DIR" ]; then
     exit 1
 fi
 
-echo
-echo "Step 3/4: building Wasserstein graph with exp(-W)"
-python "$GRAPH_SCRIPT" \
-    --input-folder "$PARCEL_SUBJECT_DIR" \
-    --sim-formula 1 \
-    --num-workers 8
+if [ -z "$SIM_FORMULA" ] || [ "$SIM_FORMULA" = "1" ]; then
+    echo
+    echo "Building Wasserstein graph with exp(-W)"
+    python "$GRAPH_SCRIPT" \
+        --input-folder "$PARCEL_SUBJECT_DIR" \
+        --sim-formula 1 \
+        --num-workers 8
+fi
 
-echo
-echo "Step 4/4: building Wasserstein graph with 1/(1+W)"
-python "$GRAPH_SCRIPT" \
-    --input-folder "$PARCEL_SUBJECT_DIR" \
-    --sim-formula 2 \
-    --num-workers 8
+if [ -z "$SIM_FORMULA" ] || [ "$SIM_FORMULA" = "2" ]; then
+    echo
+    echo "Building Wasserstein graph with 1/(1+W)"
+    python "$GRAPH_SCRIPT" \
+        --input-folder "$PARCEL_SUBJECT_DIR" \
+        --sim-formula 2 \
+        --num-workers 8
+fi
 
 echo
 echo "Pipeline complete."
