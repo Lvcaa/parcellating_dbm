@@ -35,14 +35,14 @@ def load_subjects() -> dict[str, dict]:
     skipped = []
     with open(const.DATABASE_PATH, newline="") as f:
         for row in csv.DictReader(f):
-            sid = row["ID"][4:]   # "OAS30001" -> "0001"
-            if not row["Age"].strip():
+            sid = row["OASISID"][4:]   # "OAS30001" -> "0001"
+            if not row["age at visit"].strip():
                 skipped.append(sid)
                 continue
             subjects[sid] = {
                 "id":      sid,
-                "age":     float(row["Age"]),
-                "sex":     row["Sex"],
+                "age":     float(row["age at visit"]),
+                "sex":     row["GENDER"],
                 "healthy": row["HStatus"] == "Healthy",
             }
     if skipped:

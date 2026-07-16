@@ -12,7 +12,7 @@ SCRIPTS_DIR   = PROJECT_ROOT / "scripts"
 DATA_DIR      = PROJECT_ROOT / "data"
 DATASET_DIR   = DATA_DIR / "dataset"
 REFERENCE_DIR = DATA_DIR / "reference"
-DATABASE_PATH = DATA_DIR / "database_finale.csv"
+DATABASE_PATH = DATA_DIR / "database_finale_labels_corrette.csv"
 SPLITS_PATH   = DATA_DIR / "splits.json"
 
 ROIS_DIR               = PROJECT_ROOT / "outputs" / "rois"
