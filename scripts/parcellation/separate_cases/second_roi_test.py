@@ -20,6 +20,8 @@ Examples:
 """
 
 import argparse
+import os
+import sys
 import time
 from collections import deque
 from pathlib import Path
@@ -27,6 +29,9 @@ from pathlib import Path
 import nibabel as nib
 import numpy as np
 from scipy import ndimage
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from pipeline_integrity import atomic_write_json, file_signature, sha256_file
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -120,7 +125,13 @@ def write_nifti(roi_indices, sub_roi_index, template_img, output_dir):
     header.set_data_dtype(np.uint8)
     nii_ = nib.Nifti1Image(empty_image, affine=template_img.affine, header=header)
     output_path = output_dir / f"roi_{sub_roi_index:04d}.nii.gz"
-    nii_.to_filename(str(output_path))
+    temporary = output_dir / f".{output_path.name}.{os.getpid()}.tmp.nii.gz"
+    try:
+        nii_.to_filename(str(temporary))
+        os.replace(temporary, output_path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return output_path
 
 
 def parcel_targets(n_voxels, n_parcels):
@@ -462,11 +473,13 @@ def main():
     print(f"Total output parcels: {int(component_allocation.sum())}")
 
     all_parcels = []
+    all_targets = []
     start_time = time.time()
 
     for component_id, n_component_parcels in zip(component_ids, component_allocation):
         component_coords = roi_coords[roi_component_ids == component_id]
         component_owners = grow_component(component_coords, int(n_component_parcels))
+        component_targets = parcel_targets(len(component_coords), int(n_component_parcels))
 
         for parcel_id in range(int(n_component_parcels)):
             parcel_coords = component_coords[component_owners == parcel_id]
@@ -475,19 +488,60 @@ def main():
                     f"Generated an empty parcel inside component {int(component_id)}"
                 )
             all_parcels.append(parcel_coords)
+            all_targets.append(int(component_targets[parcel_id]))
 
     print(f"Parcellation time: {time.time() - start_time:.3f} s")
 
     parcel_sizes = np.array([len(parcel) for parcel in all_parcels], dtype=np.int32)
+    if not np.array_equal(parcel_sizes, np.asarray(all_targets, dtype=np.int32)):
+        raise RuntimeError("Connected rebalancing did not reach the assigned parcel target sizes")
     print(f"Parcel size range: {int(parcel_sizes.min())} - {int(parcel_sizes.max())}")
 
+    component_counts = [connected_subcomponents(parcel) for parcel in all_parcels]
+    disconnected = [index for index, count in enumerate(component_counts) if count != 1]
+    if disconnected:
+        raise RuntimeError(f"Generated disconnected parcels: {disconnected[:10]}")
+    stacked = np.vstack(all_parcels)
+    if len(np.unique(stacked, axis=0)) != len(roi_coords):
+        raise RuntimeError("Parcels overlap or do not cover the source ROI exactly")
+
     output_dir = args.output_root / str(args.roi_label)
+    existing = list(output_dir.glob("roi_*.nii.gz")) if output_dir.exists() else []
+    if existing:
+        raise FileExistsError(
+            f"Refusing to mix a new parcellation with {len(existing)} existing masks in {output_dir}"
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    for parcel_index, parcel_coords in enumerate(all_parcels):
+    parcel_records = []
+    for parcel_index, (parcel_coords, target_size) in enumerate(zip(all_parcels, all_targets)):
         if not args.skip_neighbor_check:
             check_neigh(parcel_coords)
-        write_nifti(parcel_coords, parcel_index, template_img, output_dir)
+        output_path = write_nifti(parcel_coords, parcel_index, template_img, output_dir)
+        parcel_records.append({
+            "file": output_path.name,
+            "voxel_count": int(len(parcel_coords)),
+            "target_voxel_count": target_size,
+            "component_count_6": 1,
+            "sha256": sha256_file(output_path),
+        })
+
+    atomic_write_json(output_dir / "label_manifest.json", {
+        "schema_version": 1,
+        "validation_status": "passed",
+        "label": int(args.roi_label),
+        "source_segmentation": file_signature(args.segmentation, include_sha256=False),
+        "source_voxel_count": int(len(roi_coords)),
+        "parcel_count": len(parcel_records),
+        "parcel_size_target": int(args.parcel_size),
+        "parcel_size_min": int(parcel_sizes.min()),
+        "parcel_size_max": int(parcel_sizes.max()),
+        "parcel_sizes_match_targets": True,
+        "connectivity": 6,
+        "coverage_exact": True,
+        "overlap_voxels": 0,
+        "parcels": parcel_records,
+    })
 
 
 if __name__ == "__main__":

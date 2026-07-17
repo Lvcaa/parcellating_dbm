@@ -143,7 +143,9 @@ def run_sub_parcellations(
     parcel_size: int,
     skip_neighbor_check: bool,
 ) -> None:
-    script = const.SCRIPTS_DIR / "parcellation" / "sub_parcels_equal_size.py"
+    # Use the connected region-growing implementation for every label. The
+    # older balanced-clustering implementation can produce disconnected masks.
+    script = const.SCRIPTS_DIR / "parcellation" / "separate_cases" / "second_roi_test.py"
     for label in labels:
         print(f"Processing label {label} ({const.LABEL_DICT[label]})", flush=True)
         cmd = [
