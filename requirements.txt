@@ -1,5 +1,10 @@
 numpy
+scipy
+nibabel
+joblib
+pandas
+statsmodels
+scikit-learn
 networkx
 python-igraph
 leidenalg
-scipy
