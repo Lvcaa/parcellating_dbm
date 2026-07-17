@@ -2,9 +2,13 @@
 Build a dense Wasserstein similarity graph for one subject.
 
 Parcel vectors are sorted and projected onto a common 15-point quantile grid.
-Batched NumPy operations compute row blocks in parallel. The adjacency matrix
-is stored as a float32 memmap and weighted degree as a float64 memmap. Storage
-and compute cost grow quadratically with the parcel count.
+Batched NumPy operations compute row blocks in parallel. Weighted degree is
+always computed and stored as a float64 memmap. The dense (N, N) adjacency
+matrix is only written to disk when --save-matrix true is passed — at scale
+(up to ~90k parcels) the full matrix is far larger than the degree vector, so
+it is skipped by default. Compute cost still grows quadratically with the
+parcel count either way, since every pairwise similarity is computed to
+derive weighted degree; only the disk-write cost is avoided.
 
 Usage:
     python scripts/graph_building/wasserstein_distance_graph2.py (--input-folder PATH | --subject-id ID) --sim-formula {1,2} [options]
@@ -15,28 +19,44 @@ Parameters:
     --subject-id TEXT        Folder name under --input-root when --input-folder is omitted.
     --output-folder PATH     Custom graph output folder.
     --sim-formula {1,2}      Required transform: 1 = exp(-W), 2 = 1/(1+W).
+    --save-matrix {true,false}  Write the dense adjacency matrix to disk (default: false).
     --num-workers INT        Worker processes (default: 8).
     --block-size INT         Rows per worker job (default: 500).
     --progress-every INT     Progress interval in completed blocks (default: 10).
 
 Outputs:
-    adjacency_matrix.dat, weighted_degree.dat, metadata.npy, metadata.json,
-    parcel_order.txt
+    weighted_degree.dat, metadata.npy, metadata.json, parcel_order.txt, and
+    adjacency_matrix.dat only when --save-matrix true.
 
 Examples:
     python scripts/graph_building/wasserstein_distance_graph2.py --subject-id sub-0091 --sim-formula 1
     python scripts/graph_building/wasserstein_distance_graph2.py --input-folder outputs/jacobian_parcel_vectors/sub-OAS30999 --sim-formula 2 --num-workers 4 --block-size 200
+    python scripts/graph_building/wasserstein_distance_graph2.py --subject-id sub-0091 --sim-formula 1 --save-matrix true
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
+import sys
 import time
 from pathlib import Path
 
 import numpy as np
 from joblib import Parallel, delayed
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pipeline_integrity import (
+    atomic_save_npy,
+    atomic_write_json,
+    atomic_write_raw,
+    atomic_write_text,
+    load_completion,
+    sha256_lines,
+    validate_raw_vector,
+    write_completion,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -104,6 +124,18 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--save-matrix",
+        dest="save_matrix",
+        type=str.lower,
+        choices=("true", "false"),
+        default="false",
+        help=(
+            "Write the dense (N, N) adjacency matrix to disk (default: false). "
+            "The matrix is large at scale; weighted degree is always computed "
+            "and saved regardless of this flag."
+        ),
+    )
+    parser.add_argument(
         "--num-workers",
         type=int,
         default=8,
@@ -124,6 +156,12 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Print a progress update every N completed blocks (default: 10).",
     )
+    parser.add_argument(
+        "--allow-unvalidated-input",
+        action="store_true",
+        help="Allow parcel folders without complete.json (diagnostic use only).",
+    )
+    parser.add_argument("--force", action="store_true", help="Recompute a matching completed graph.")
     return parser.parse_args()
 
 
@@ -164,7 +202,8 @@ def _to_quantile_grid(v: np.ndarray) -> np.ndarray:
 def load_subject_parcels(subject_folder: Path) -> tuple[list[str], np.ndarray]:
     """Return parcel IDs and a float32 sorted matrix of shape (N, QUANTILE_LEN)."""
     label_dirs = sorted(
-        p for p in subject_folder.iterdir() if p.is_dir() and p.name.startswith("label_")
+        (p for p in subject_folder.iterdir() if p.is_dir() and p.name.startswith("label_")),
+        key=lambda path: int(path.name.removeprefix("label_")),
     )
     if not label_dirs:
         raise ValueError(f"No label_* directories found under {subject_folder}")
@@ -173,7 +212,9 @@ def load_subject_parcels(subject_folder: Path) -> tuple[list[str], np.ndarray]:
     rows: list[np.ndarray] = []
 
     for label_dir in label_dirs:
-        for npy_path in sorted(label_dir.glob("*.npy")):
+        for npy_path in sorted(
+            label_dir.glob("roi_*.npy"), key=lambda path: int(path.stem.removeprefix("roi_"))
+        ):
             v = np.load(npy_path).reshape(-1)
             if v.size == 0:
                 raise ValueError(f"Parcel vector is empty: {npy_path}")
@@ -240,7 +281,7 @@ def _compute_block(
 
 
 def save_parcel_order(parcel_ids: list[str], output_path: Path) -> None:
-    output_path.write_text("\n".join(parcel_ids) + "\n", encoding="utf-8")
+    atomic_write_text(output_path, "\n".join(parcel_ids) + "\n")
 
 
 def save_metadata(
@@ -248,6 +289,9 @@ def save_metadata(
     subject_id: str,
     n_parcels: int,
     sim_formula: int,
+    save_matrix: bool,
+    input_completion: dict,
+    parcel_order_hash: str,
 ) -> None:
     metadata = {
         "subject_id": subject_id,
@@ -257,13 +301,72 @@ def save_metadata(
         "quantile_count": QUANTILE_LEN,
         "distance": "Wasserstein-1 approximated by mean absolute quantile difference",
         "similarity_formula": SIM_FORMULA_LABELS[sim_formula],
+        "adjacency_matrix_saved": save_matrix,
         "adjacency_dtype": "float32",
         "weighted_degree_dtype": "float64",
         "weighted_degree_normalization": "sum of off-diagonal similarities divided by N-1",
         "self_loops_in_adjacency": True,
         "self_loops_in_weighted_degree": False,
+        "atlas_id": input_completion.get("atlas_id"),
+        "atlas_manifest_sha256": input_completion.get("atlas_manifest_sha256"),
+        "parcel_order_sha256": parcel_order_hash,
     }
-    output_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    atomic_write_json(output_path, metadata)
+
+
+def read_input_contract(subject_folder: Path, allow_unvalidated: bool) -> tuple[dict, list[str]]:
+    completion = load_completion(subject_folder)
+    order_path = subject_folder / "parcel_order.txt"
+    if completion is None:
+        if not allow_unvalidated:
+            raise ValueError(
+                f"Validated parcel completion marker missing: {subject_folder / 'complete.json'}"
+            )
+        return {"stage": "UNVALIDATED", "atlas_id": "UNVALIDATED"}, []
+    if completion.get("stage") != "parcel_vectors":
+        raise ValueError(f"Unexpected input completion stage in {subject_folder}")
+    if not order_path.is_file():
+        raise ValueError(f"Parcel order missing: {order_path}")
+    parcel_ids = order_path.read_text(encoding="utf-8").splitlines()
+    if len(parcel_ids) != completion.get("parcel_count"):
+        raise ValueError(f"Parcel-order count differs from completion manifest: {subject_folder}")
+    if sha256_lines(parcel_ids) != completion.get("parcel_order_sha256"):
+        raise ValueError(f"Parcel-order hash differs from completion manifest: {subject_folder}")
+    return completion, parcel_ids
+
+
+def graph_is_complete(
+    out_dir: Path,
+    *,
+    subject_id: str,
+    n_parcels: int,
+    parcel_order_hash: str,
+    input_completion: dict,
+    sim_formula: int,
+    save_matrix: bool,
+) -> bool:
+    completion = load_completion(out_dir)
+    if completion is None or completion.get("stage") != "wasserstein_graph":
+        return False
+    expected = {
+        "subject_id": subject_id,
+        "parcel_count": n_parcels,
+        "parcel_order_sha256": parcel_order_hash,
+        "atlas_manifest_sha256": input_completion.get("atlas_manifest_sha256"),
+        "sim_formula": sim_formula,
+        "adjacency_matrix_saved": save_matrix,
+    }
+    if any(completion.get(key) != value for key, value in expected.items()):
+        return False
+    try:
+        validate_raw_vector(out_dir / "weighted_degree.dat", length=n_parcels)
+    except ValueError:
+        return False
+    if save_matrix:
+        matrix = out_dir / "adjacency_matrix.dat"
+        if not matrix.is_file() or matrix.stat().st_size != n_parcels * n_parcels * 4:
+            return False
+    return True
 
 
 def main() -> None:
@@ -272,6 +375,7 @@ def main() -> None:
         raise ValueError("--num-workers must be at least 1")
     if args.block_size < 1:
         raise ValueError("--block-size must be at least 1")
+    save_matrix = args.save_matrix == "true"
 
     subject_folder, subject_id = resolve_subject_folder(
         input_folder=args.input_folder,
@@ -281,12 +385,38 @@ def main() -> None:
 
     print(f"Subject:      {subject_id}", flush=True)
     print(f"Input folder: {subject_folder}", flush=True)
+    print(f"Save dense adjacency matrix: {save_matrix}", flush=True)
     print(f"Similarity formula: {args.sim_formula} ({SIM_FORMULA_LABELS[args.sim_formula]})", flush=True)
+
+    input_completion, expected_parcel_ids = read_input_contract(
+        subject_folder, args.allow_unvalidated_input
+    )
+    out_dir = (
+        args.output_folder
+        if args.output_folder is not None
+        else default_output_root(args.sim_formula) / subject_id
+    )
+    if expected_parcel_ids:
+        expected_hash = sha256_lines(expected_parcel_ids)
+        if not args.force and graph_is_complete(
+            out_dir,
+            subject_id=subject_id,
+            n_parcels=len(expected_parcel_ids),
+            parcel_order_hash=expected_hash,
+            input_completion=input_completion,
+            sim_formula=args.sim_formula,
+            save_matrix=save_matrix,
+        ):
+            print(f"Validated graph output already complete: {out_dir}", flush=True)
+            return
 
     parcel_ids, sorted_matrix = load_subject_parcels(subject_folder)
     N = len(parcel_ids)
     if N < 2:
         raise ValueError("At least two parcels are required to build a graph")
+    parcel_order_hash = sha256_lines(parcel_ids)
+    if expected_parcel_ids and parcel_ids != expected_parcel_ids:
+        raise ValueError("Loaded parcel files differ from the validated input parcel order")
     print(f"Loaded {N} parcels  →  sorted matrix shape {sorted_matrix.shape}", flush=True)
 
     # Pre-compute row block boundaries
@@ -301,22 +431,19 @@ def main() -> None:
         flush=True,
     )
 
-    # Allocate output memmaps up front
-    out_dir = (
-        args.output_folder
-        if args.output_folder is not None
-        else default_output_root(args.sim_formula) / subject_id
-    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    mm_matrix = np.memmap(
-        out_dir / "adjacency_matrix.dat",
-        dtype="float32",
-        mode="w+",
-        shape=(N, N),
-    )
-    mm_matrix[:] = 0.0
-    np.fill_diagonal(mm_matrix, 1.0)
+    mm_matrix = None
+    temporary_matrix_path = out_dir / f".adjacency_matrix.{os.getpid()}.tmp"
+    if save_matrix:
+        mm_matrix = np.memmap(
+            temporary_matrix_path,
+            dtype="float32",
+            mode="w+",
+            shape=(N, N),
+        )
+        mm_matrix[:] = 0.0
+        np.fill_diagonal(mm_matrix, 1.0)
 
     weighted_degree = np.zeros(N, dtype=np.float64)
 
@@ -327,9 +454,12 @@ def main() -> None:
     )
 
     for completed, (i_start, i_end, sim_block) in enumerate(results, start=1):
-        mm_matrix[i_start:i_end, :] = sim_block
-        mm_matrix[:, i_start:i_end] = sim_block.T
-        # accumulate weighted degree for these rows
+        if mm_matrix is not None:
+            mm_matrix[i_start:i_end, :] = sim_block
+            mm_matrix[:, i_start:i_end] = sim_block.T
+        # sim_block already spans all N columns for these rows, so weighted
+        # degree for this block is complete on its own regardless of whether
+        # the full matrix is persisted.
         block_degree = (sim_block.sum(axis=1, dtype=np.float64) - 1.0) / (N - 1)
         if not np.isfinite(block_degree).all():
             raise ValueError(f"Non-finite weighted degree in row block [{i_start}, {i_end})")
@@ -343,20 +473,36 @@ def main() -> None:
                 flush=True,
             )
 
-    del mm_matrix  # flush memmap
+    if mm_matrix is not None:
+        mm_matrix.flush()
+        del mm_matrix
+        os.replace(temporary_matrix_path, out_dir / "adjacency_matrix.dat")
 
-    mm_degree = np.memmap(
-        out_dir / "weighted_degree.dat",
-        dtype="float64",
-        mode="w+",
-        shape=(N,),
+    atomic_write_raw(out_dir / "weighted_degree.dat", weighted_degree, "float64")
+    atomic_save_npy(out_dir / "metadata.npy", np.array([N], dtype=np.int64))
+    save_metadata(
+        out_dir / "metadata.json",
+        subject_id,
+        N,
+        args.sim_formula,
+        save_matrix,
+        input_completion,
+        parcel_order_hash,
     )
-    mm_degree[:] = weighted_degree
-    del mm_degree
-
-    np.save(out_dir / "metadata.npy", np.array([N], dtype=np.int64))
-    save_metadata(out_dir / "metadata.json", subject_id, N, args.sim_formula)
     save_parcel_order(parcel_ids, out_dir / "parcel_order.txt")
+    write_completion(out_dir, {
+        "schema_version": 1,
+        "stage": "wasserstein_graph",
+        "subject_id": subject_id,
+        "parcel_count": N,
+        "parcel_order_sha256": parcel_order_hash,
+        "atlas_id": input_completion.get("atlas_id"),
+        "atlas_manifest_sha256": input_completion.get("atlas_manifest_sha256"),
+        "sim_formula": args.sim_formula,
+        "similarity_formula": SIM_FORMULA_LABELS[args.sim_formula],
+        "adjacency_matrix_saved": save_matrix,
+        "weighted_degree_dtype": "float64",
+    })
 
     elapsed = time.time() - start_time
     print(f"\nDone in {elapsed:.1f}s  →  {out_dir}", flush=True)
