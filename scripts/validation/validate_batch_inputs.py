@@ -13,8 +13,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subjects", type=Path, required=True)
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--warps-root", type=Path, required=True)
-    parser.add_argument("--expected-healthy", type=int, default=137)
-    parser.add_argument("--expected-unhealthy", type=int, default=130)
+    parser.add_argument("--expected-healthy", type=int, default=684)
+    parser.add_argument("--expected-unhealthy", type=int, default=504)
     return parser.parse_args()
 
 

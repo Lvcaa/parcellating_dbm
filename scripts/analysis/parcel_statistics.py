@@ -15,6 +15,10 @@ from statsmodels.stats.multitest import multipletests
 FEATURE_LOCATIONS = {
     "weighted_degree_expW": ("wasserstein_graphs_expW", "weighted_degree.dat"),
     "weighted_degree_inv1pW": ("wasserstein_graphs_inv1pW", "weighted_degree.dat"),
+    "weighted_degree_kl_expW": ("kl_graphs_expW", "weighted_degree.dat"),
+    "weighted_degree_kl_inv1pW": ("kl_graphs_inv1pW", "weighted_degree.dat"),
+    "weighted_degree_meiq_expW": ("median_iqr_graphs_expW", "weighted_degree.dat"),
+    "weighted_degree_meiq_inv1pW": ("median_iqr_graphs_inv1pW", "weighted_degree.dat"),
     "direct_mean": ("jacobian_parcel_vectors", "direct_mean.dat"),
     "direct_median": ("jacobian_parcel_vectors", "direct_median.dat"),
 }
@@ -37,15 +41,21 @@ def read_subject_manifest(path: Path) -> list[str]:
     return subjects
 
 
-def cohort_table(subjects: list[str], database_path: Path) -> pd.DataFrame:
+def cohort_table(
+    subjects: list[str],
+    database_path: Path,
+    expected_healthy: int,
+    expected_unhealthy: int,
+) -> pd.DataFrame:
     database = pd.read_csv(database_path).copy()
     database["subject_id"] = "sub-" + database["OASISID"].astype(str).str.removeprefix("OAS3")
     if database["subject_id"].duplicated().any():
         raise ValueError("Database contains duplicate subject IDs")
     cohort = database.set_index("subject_id").loc[subjects].reset_index()
     counts = cohort["HStatus"].value_counts().to_dict()
-    if counts != {"Healthy": 137, "Unhealthy": 130}:
-        raise ValueError(f"Expected 137 Healthy/130 Unhealthy, got {counts}")
+    expected = {"Healthy": expected_healthy, "Unhealthy": expected_unhealthy}
+    if counts != expected:
+        raise ValueError(f"Expected {expected}, got {counts}")
     return cohort
 
 
@@ -195,9 +205,11 @@ def analyse_feature(
     subjects_path: Path,
     database_path: Path,
     feature: str,
+    expected_healthy: int,
+    expected_unhealthy: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     subjects = read_subject_manifest(subjects_path)
-    cohort = cohort_table(subjects, database_path)
+    cohort = cohort_table(subjects, database_path, expected_healthy, expected_unhealthy)
     parcel_ids, matrix = load_feature_matrix(run_root, subjects, feature)
     results = welch_results(matrix, cohort, parcel_ids)
     results = pd.concat([results, covariate_glm(matrix, cohort)], axis=1)
@@ -212,13 +224,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--feature", choices=tuple(FEATURE_LOCATIONS), required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--expected-healthy", type=int, default=684)
+    parser.add_argument("--expected-unhealthy", type=int, default=504)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     results, sensitivity = analyse_feature(
-        args.run_root, args.subjects, args.database, args.feature
+        args.run_root,
+        args.subjects,
+        args.database,
+        args.feature,
+        args.expected_healthy,
+        args.expected_unhealthy,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
     results.to_csv(args.output_dir / f"{args.feature}_parcel_statistics.csv", index=False)

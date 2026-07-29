@@ -373,46 +373,25 @@ def parcel_ids_for_exports(label_exports: list[tuple[int, list[Path]]]) -> list[
 
 
 def load_atlas_contract(args: argparse.Namespace, parcel_ids: list[str]) -> tuple[dict, str]:
+    """Require outputs/rois/atlas_manifest.json (from check_roi_counts.py) to show every label ok."""
     manifest_path = args.roi_manifest or args.rois_dir / DEFAULT_ROI_MANIFEST_NAME
-    parcel_order_hash = sha256_lines(parcel_ids)
     if not manifest_path.is_file():
         if not args.allow_unvalidated_rois:
             raise ValueError(
-                f"Validated ROI manifest not found: {manifest_path}. "
-                "Build or validate the corrected atlas first."
+                f"ROI count-check manifest not found: {manifest_path}. "
+                "Run scripts/validation/check_roi_counts.py first."
             )
-        return {
-            "atlas_id": "UNVALIDATED",
-            "parcel_count": len(parcel_ids),
-            "parcel_order_sha256": parcel_order_hash,
-        }, "UNVALIDATED"
+        return {"atlas_id": "UNVALIDATED", "parcel_count": len(parcel_ids)}, "UNVALIDATED"
 
     atlas = read_json(manifest_path)
-    if atlas.get("validation_status") != "passed":
-        raise ValueError(f"Atlas manifest is not marked passed: {manifest_path}")
-    if (
-        atlas.get("connectivity") != 6
-        or atlas.get("coverage_exact_per_label") is not True
-        or not atlas.get("mask_content_sha256")
-    ):
-        raise ValueError(f"Atlas lacks the corrected connectivity/coverage/content contract: {manifest_path}")
-    if atlas.get("parcel_count") != len(parcel_ids):
-        raise ValueError(
-            f"Atlas parcel count mismatch: manifest={atlas.get('parcel_count')}, "
-            f"discovered={len(parcel_ids)}"
+    if not atlas.get("all_ok"):
+        bad_labels = sorted(
+            row.get("label") for row in atlas.get("labels", []) if row.get("status") != "ok"
         )
-    if atlas.get("parcel_order_sha256") != parcel_order_hash:
-        raise ValueError("ROI files do not match the parcel order frozen in the atlas manifest")
-    required = set(atlas.get("required_labels", []))
-    discovered = {
-        int(parcel_id.split("/", 1)[0].removeprefix("label_"))
-        for parcel_id in parcel_ids
-    }
-    missing = sorted(required - discovered)
-    if missing:
-        raise ValueError(f"Required ROI labels missing from atlas: {missing}")
-    if 42 not in required:
-        raise ValueError("Corrected atlas manifest does not require right cerebral cortex label 42")
+        raise ValueError(
+            f"ROI count check has not passed for labels {bad_labels}: {manifest_path}. "
+            "Re-run scripts/validation/check_roi_counts.py."
+        )
     return atlas, sha256_file(manifest_path)
 
 

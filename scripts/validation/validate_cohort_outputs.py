@@ -12,13 +12,23 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pipeline_integrity import atomic_write_json, load_completion, read_json, validate_raw_vector
 
 
+# Mirrors METHOD_OUTPUT_PREFIX / SIM_FORMULA_OUTPUT_NAMES in
+# scripts/graph_building/wasserstein_distance_graph2.py.
+GRAPH_METHOD_PREFIXES = {
+    "was": "wasserstein_graphs",
+    "kl": "kl_graphs",
+    "meiq": "median_iqr_graphs",
+}
+SIM_FORMULA_NAMES = {1: "expW", 2: "inv1pW"}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-root", type=Path, required=True)
     parser.add_argument("--subjects", type=Path, required=True)
     parser.add_argument("--database", type=Path, required=True)
-    parser.add_argument("--expected-healthy", type=int, default=137)
-    parser.add_argument("--expected-unhealthy", type=int, default=130)
+    parser.add_argument("--expected-healthy", type=int, default=684)
+    parser.add_argument("--expected-unhealthy", type=int, default=504)
     parser.add_argument("--report", type=Path, default=None)
     return parser.parse_args()
 
@@ -52,6 +62,8 @@ def main() -> None:
         raise ValueError("Definitive cohort validation requires both similarity formulas")
     if configuration.get("save_matrix") != "false":
         raise ValueError("Definitive cohort validation requires save_matrix=false")
+    if configuration.get("method") != "was,kl,meiq":
+        raise ValueError("Definitive cohort validation requires all three edge definitions")
 
     subjects = read_subjects(args.subjects)
     groups = read_groups(args.database)
@@ -66,8 +78,11 @@ def main() -> None:
     expected_set = set(subjects)
     vector_root = args.run_root / "jacobian_parcel_vectors"
     graph_roots = {
-        "expW": (args.run_root / "wasserstein_graphs_expW", 1),
-        "inv1pW": (args.run_root / "wasserstein_graphs_inv1pW", 2),
+        f"{method}_{formula_name}": (
+            args.run_root / f"{prefix}_{formula_name}", method, formula_int
+        )
+        for method, prefix in GRAPH_METHOD_PREFIXES.items()
+        for formula_int, formula_name in SIM_FORMULA_NAMES.items()
     }
     for root in (vector_root, *(entry[0] for entry in graph_roots.values())):
         discovered = {path.name for path in root.iterdir() if path.is_dir()}
@@ -94,22 +109,24 @@ def main() -> None:
         validate_raw_vector(vector_root / subject / "direct_mean.dat", length=n)
         validate_raw_vector(vector_root / subject / "direct_median.dat", length=n)
 
-        for formula, (root, expected_formula) in graph_roots.items():
+        for label, (root, method, expected_formula) in graph_roots.items():
             completion = load_completion(root / subject)
             if completion is None or completion.get("stage") != "wasserstein_graph":
-                raise ValueError(f"Incomplete {formula} graph: {subject}")
+                raise ValueError(f"Incomplete {label} graph: {subject}")
+            if completion.get("method") != method:
+                raise ValueError(f"Wrong method in {label}/{subject}")
             if completion.get("sim_formula") != expected_formula:
-                raise ValueError(f"Wrong similarity formula in {formula}/{subject}")
+                raise ValueError(f"Wrong similarity formula in {label}/{subject}")
             if completion.get("adjacency_matrix_saved") is not False:
-                raise ValueError(f"Unexpected dense adjacency matrix contract: {formula}/{subject}")
+                raise ValueError(f"Unexpected dense adjacency matrix contract: {label}/{subject}")
             if (root / subject / "adjacency_matrix.dat").exists():
-                raise ValueError(f"Dense adjacency matrix retained: {formula}/{subject}")
+                raise ValueError(f"Dense adjacency matrix retained: {label}/{subject}")
             if (
                 completion.get("parcel_count"),
                 completion.get("parcel_order_sha256"),
                 completion.get("atlas_manifest_sha256"),
             ) != (parcel_count, reference_order_hash, reference_atlas_hash):
-                raise ValueError(f"Graph contract differs: {formula}/{subject}")
+                raise ValueError(f"Graph contract differs: {label}/{subject}")
             validate_raw_vector(root / subject / "weighted_degree.dat", length=n)
 
     if reference_atlas_hash not in run_manifest.get("files", {}).values():
