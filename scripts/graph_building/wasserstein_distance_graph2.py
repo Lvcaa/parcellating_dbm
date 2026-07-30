@@ -33,7 +33,7 @@ Parameters:
     --block-size INT         Rows per worker job (default: 500).
     --progress-every INT     Progress interval in completed blocks (default: 10).
 
-Outputs (per method, under its own output folder):
+Outputs (per method, under its own output folder/<subject_id>/):
     weighted_degree.dat, metadata.npy, metadata.json, parcel_order.txt, and
     adjacency_matrix.dat only when --save-matrix true.
 
@@ -243,9 +243,9 @@ def resolve_subject_folder(
     return subject_folder, resolved_subject_id
 
 
-def default_output_root(method: str, sim_formula: int) -> Path:
+def default_output_root(method: str, sim_formula: int, subject_id: str) -> Path:
     formula_name = SIM_FORMULA_OUTPUT_NAMES[sim_formula]
-    return PROJECT_ROOT / "outputs" / f"{METHOD_OUTPUT_PREFIX[method]}_{formula_name}"
+    return PROJECT_ROOT / "outputs" / f"{METHOD_OUTPUT_PREFIX[method]}_{formula_name}" / subject_id
 
 
 def _to_quantile_grid(v: np.ndarray) -> np.ndarray:
@@ -654,7 +654,7 @@ def main() -> None:
 
     # Loop over all the methods the user requested, building each graph in turn. The parcel vectors are loaded once and reused.
     for method in methods:
-        out_dir = args.output_folder if args.output_folder is not None else default_output_root(method, args.sim_formula)
+        out_dir = args.output_folder if args.output_folder is not None else default_output_root(method, args.sim_formula, subject_id)
 
         # Check if the graph is already complete and valid; skip if so, unless --force is used.
         if not args.force and expected_parcel_ids and graph_is_complete(
