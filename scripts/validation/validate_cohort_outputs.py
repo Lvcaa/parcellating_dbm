@@ -30,6 +30,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--expected-healthy", type=int, default=684)
     parser.add_argument("--expected-unhealthy", type=int, default=504)
     parser.add_argument("--report", type=Path, default=None)
+    parser.add_argument(
+        "--manifest",
+        type=Path,
+        default=None,
+        help="Frozen run manifest to validate against (default: <run-root>/run_manifest.json).",
+    )
+    parser.add_argument(
+        "--methods",
+        default="was,kl,meiq",
+        help=(
+            "Comma-separated subset of {was, kl, meiq} to validate (default: was,kl,meiq, "
+            "i.e. the definitive cross-definition validation). Passing a strict subset, "
+            "e.g. 'was', validates a provisional single-method run instead and the report "
+            "is marked non-definitive."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -53,17 +69,27 @@ def read_groups(path: Path) -> dict[str, str]:
 
 def main() -> None:
     args = parse_args()
-    run_manifest_path = args.run_root / "run_manifest.json"
+    methods = [token.strip() for token in args.methods.split(",") if token.strip()]
+    unknown = [method for method in methods if method not in GRAPH_METHOD_PREFIXES]
+    if not methods or unknown:
+        raise ValueError(f"--methods must be a non-empty subset of {tuple(GRAPH_METHOD_PREFIXES)}")
+    is_definitive = set(methods) == set(GRAPH_METHOD_PREFIXES)
+
+    run_manifest_path = args.manifest or args.run_root / "run_manifest.json"
     if not run_manifest_path.is_file():
         raise ValueError(f"Frozen run manifest missing: {run_manifest_path}")
     run_manifest = read_json(run_manifest_path)
     configuration = run_manifest.get("configuration", {})
     if configuration.get("sim_formula") != "both":
-        raise ValueError("Definitive cohort validation requires both similarity formulas")
+        raise ValueError("Cohort validation requires both similarity formulas")
     if configuration.get("save_matrix") != "false":
-        raise ValueError("Definitive cohort validation requires save_matrix=false")
-    if configuration.get("method") != "was,kl,meiq":
-        raise ValueError("Definitive cohort validation requires all three edge definitions")
+        raise ValueError("Cohort validation requires save_matrix=false")
+    if configuration.get("method") != args.methods:
+        raise ValueError(f"Run manifest method {configuration.get('method')!r} does not match --methods {args.methods!r}")
+    if is_definitive:
+        print("Validating all three edge definitions (was, kl, meiq): definitive cohort validation.")
+    else:
+        print(f"Validating methods {methods}: PROVISIONAL run, not a substitute for cross-definition validation.")
 
     subjects = read_subjects(args.subjects)
     groups = read_groups(args.database)
@@ -79,9 +105,9 @@ def main() -> None:
     vector_root = args.run_root / "jacobian_parcel_vectors"
     graph_roots = {
         f"{method}_{formula_name}": (
-            args.run_root / f"{prefix}_{formula_name}", method, formula_int
+            args.run_root / f"{GRAPH_METHOD_PREFIXES[method]}_{formula_name}", method, formula_int
         )
-        for method, prefix in GRAPH_METHOD_PREFIXES.items()
+        for method in methods
         for formula_int, formula_name in SIM_FORMULA_NAMES.items()
     }
     for root in (vector_root, *(entry[0] for entry in graph_roots.values())):
@@ -101,7 +127,7 @@ def main() -> None:
             raise ValueError(f"Incomplete parcel vectors: {subject}")
         n = int(vector_completion["parcel_count"])
         order_hash = vector_completion["parcel_order_sha256"]
-        atlas_hash = vector_completion["atlas_manifest_sha256"]
+        atlas_hash = vector_completion["atlas_id"]
         if parcel_count is None:
             parcel_count, reference_order_hash, reference_atlas_hash = n, order_hash, atlas_hash
         if (n, order_hash, atlas_hash) != (parcel_count, reference_order_hash, reference_atlas_hash):
@@ -124,23 +150,25 @@ def main() -> None:
             if (
                 completion.get("parcel_count"),
                 completion.get("parcel_order_sha256"),
-                completion.get("atlas_manifest_sha256"),
+                completion.get("atlas_id"),
             ) != (parcel_count, reference_order_hash, reference_atlas_hash):
                 raise ValueError(f"Graph contract differs: {label}/{subject}")
             validate_raw_vector(root / subject / "weighted_degree.dat", length=n)
 
-    if reference_atlas_hash not in run_manifest.get("files", {}).values():
-        raise ValueError("Subject atlas hash is not present in the frozen run manifest")
+    if reference_atlas_hash not in run_manifest.get("atlas_manifest", {}).values():
+        raise ValueError("Subject atlas id is not present in the frozen run manifest")
 
     report = {
         "schema_version": 1,
         "validation_status": "passed",
+        "definitive": is_definitive,
+        "methods_validated": methods,
         "run_root": str(args.run_root.resolve()),
         "subject_count": len(subjects),
         "group_counts": dict(counts),
         "parcel_count": parcel_count,
         "parcel_order_sha256": reference_order_hash,
-        "atlas_manifest_sha256": reference_atlas_hash,
+        "atlas_id": reference_atlas_hash,
         "dense_adjacency_required": False,
         "run_configuration": configuration,
     }

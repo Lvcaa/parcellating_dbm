@@ -16,14 +16,19 @@
 # Usage:
 #   scripts/pipelines/run_full_pipeline.sh [run-id]
 #
-# Environment overrides (all optional):
-#   SUBJECTS_FILE   default: data/test_cohort_warps_available.txt
-#   DATABASE        default: data/database_finale_labels_corrette.csv
-#   WARPS_ROOT      default: data/warps
-#   ROIS_DIR        default: outputs/rois
-#   EXPECTED_HEALTHY / EXPECTED_UNHEALTHY   default: 684 / 504
-#   EXPORT_WORKERS  default: 4   (parcel-vector export thread count)
-#   GRAPH_WORKERS   default: 8   (graph-building process count)
+# All configuration below is hardcoded on purpose (not read from the
+# environment): a stray `export METHODS=was` left over in a shell/screen
+# session from a previous provisional run silently changed the config of
+# a later run and cost real debugging time. To change a value, edit the
+# literal below and re-run -- do not reintroduce environment overrides.
+#
+# METHODS=was is a provisional escape hatch for the KL edge definition's
+# numerical-instability bug (symmetrized Gaussian KL blows up to the
+# thousands at ~15-voxel parcel resolution, so exp(-KL) hard-underflows
+# to 0.0 and trips the similarity sanity check -- see graph-building
+# stage). Cohort validation with METHODS=was is explicitly marked
+# non-definitive; re-run with was,kl,meiq once the KL similarity
+# transform is fixed, before drawing any conclusions.
 
 set -euo pipefail
 
@@ -31,16 +36,17 @@ PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$PROJECT_ROOT"
 
 RUN_ID="${1:-full_pipeline_$(date +%Y%m%d)}"
-SUBJECTS_FILE="${SUBJECTS_FILE:-data/test_cohort_warps_available.txt}"
-DATABASE="${DATABASE:-data/database_finale_labels_corrette.csv}"
-WARPS_ROOT="${WARPS_ROOT:-data/warps}"
-ROIS_DIR="${ROIS_DIR:-outputs/rois}"
-EXPECTED_HEALTHY="${EXPECTED_HEALTHY:-684}"
-EXPECTED_UNHEALTHY="${EXPECTED_UNHEALTHY:-504}"
-EXPORT_WORKERS="${EXPORT_WORKERS:-4}"
-GRAPH_WORKERS="${GRAPH_WORKERS:-8}"
+SUBJECTS_FILE="data/test_cohort_warps_available.txt"
+DATABASE="data/database_finale_labels_corrette.csv"
+WARPS_ROOT="data/warps"
+ROIS_DIR="outputs/rois"
+EXPECTED_HEALTHY=684
+EXPECTED_UNHEALTHY=504
+EXPORT_WORKERS=8
+GRAPH_WORKERS=16
+METHODS="was"  # provisional: kl is broken (see note above); flip to "was,kl,meiq" once fixed
 OUTPUT_ROOT="outputs"
-RUN_MANIFEST="$OUTPUT_ROOT/run_manifest.json"
+RUN_MANIFEST="$OUTPUT_ROOT/run_manifest_${RUN_ID}.json"
 
 echo "=== run-id=$RUN_ID  started $(date +"%d-%m-%Y %H:%M") ==="
 
@@ -65,7 +71,7 @@ python scripts/validation/freeze_pipeline.py "$FREEZE_MODE" \
   --subject-list "$SUBJECTS_FILE" \
   --config sim_formula=both \
   --config save_matrix=false \
-  --config method=was,kl,meiq
+  --config method="$METHODS"
 
 echo "--- [4/6] Per-subject: log-Jacobian -> parcel vectors -> graphs ---"
 subject_count=$(grep -c . "$SUBJECTS_FILE")
@@ -85,30 +91,26 @@ while IFS= read -r subject_id; do
     --num-workers "$EXPORT_WORKERS"
 
   python scripts/graph_building/wasserstein_distance_graph2.py \
-    --subject-id "$subject_id" --method was,kl,meiq --sim-formula 1 --num-workers "$GRAPH_WORKERS"
+    --subject-id "$subject_id" --method "$METHODS" --sim-formula 1 --num-workers "$GRAPH_WORKERS"
   python scripts/graph_building/wasserstein_distance_graph2.py \
-    --subject-id "$subject_id" --method was,kl,meiq --sim-formula 2 --num-workers "$GRAPH_WORKERS"
+    --subject-id "$subject_id" --method "$METHODS" --sim-formula 2 --num-workers "$GRAPH_WORKERS"
 done < "$SUBJECTS_FILE"
 
-echo "--- [5/6] Validating full cohort ---"
+echo "--- [5/6] Validating cohort (methods: $METHODS) ---"
 python scripts/validation/validate_cohort_outputs.py \
   --run-root "$OUTPUT_ROOT" \
   --subjects "$SUBJECTS_FILE" \
   --database "$DATABASE" \
   --expected-healthy "$EXPECTED_HEALTHY" \
-  --expected-unhealthy "$EXPECTED_UNHEALTHY"
+  --expected-unhealthy "$EXPECTED_UNHEALTHY" \
+  --methods "$METHODS" \
+  --manifest "$RUN_MANIFEST"
 
 echo "--- [6/6] Running parcel-wise statistics ---"
-FEATURES=(
-  weighted_degree_expW
-  weighted_degree_inv1pW
-  weighted_degree_kl_expW
-  weighted_degree_kl_inv1pW
-  weighted_degree_meiq_expW
-  weighted_degree_meiq_inv1pW
-  direct_mean
-  direct_median
-)
+FEATURES=(direct_mean direct_median)
+if [[ ",$METHODS," == *",was,"* ]]; then FEATURES+=(weighted_degree_expW weighted_degree_inv1pW); fi
+if [[ ",$METHODS," == *",kl,"* ]]; then FEATURES+=(weighted_degree_kl_expW weighted_degree_kl_inv1pW); fi
+if [[ ",$METHODS," == *",meiq,"* ]]; then FEATURES+=(weighted_degree_meiq_expW weighted_degree_meiq_inv1pW); fi
 for feature in "${FEATURES[@]}"; do
   python scripts/analysis/parcel_statistics.py \
     --run-root "$OUTPUT_ROOT" \
