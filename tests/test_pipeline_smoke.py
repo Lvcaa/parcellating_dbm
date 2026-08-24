@@ -18,7 +18,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "graph_building"))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "parcellation"))
 sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "parcellation" / "separate_cases"))
 
-from export_masked_jacobian_vectors import export_vectors, write_direct_summaries
+from export_masked_jacobian_vectors import extract_vectors, write_direct_summaries
 from pipeline_integrity import atomic_save_npy
 from second_roi_test import connected_subcomponents, grow_component, parcel_targets
 from wasserstein_distance_graph2 import (
@@ -83,6 +83,28 @@ class ConnectedParcellationTest(unittest.TestCase):
         for parcel_id in range(len(targets)):
             self.assertEqual(connected_subcomponents(coordinates[owners == parcel_id]), 1)
 
+    def test_narrow_neck_is_deterministic_connected_and_bounded(self) -> None:
+        mask = np.zeros((12, 12, 3), dtype=bool)
+        mask[1:5, 1:5, 1] = True
+        mask[7:11, 7:11, 1] = True
+        mask[4:8, 4, 1] = True
+        mask[7, 4:8, 1] = True
+        coordinates = np.argwhere(mask)
+        n_parcels = int(np.ceil(len(coordinates) / 15))
+
+        first = grow_component(coordinates, n_parcels)
+        second = grow_component(coordinates, n_parcels)
+        np.testing.assert_array_equal(first, second)
+
+        sizes = np.bincount(first, minlength=n_parcels)
+        targets = parcel_targets(len(coordinates), n_parcels)
+        self.assertGreaterEqual(int(sizes.min()), max(1, int(targets.min()) - 4))
+        self.assertLessEqual(int(sizes.max()), int(targets.max()) + 3)
+        for parcel_id in range(n_parcels):
+            self.assertEqual(
+                connected_subcomponents(coordinates[first == parcel_id]), 1
+            )
+
 
 class ExtractionAndAtomicIoTest(unittest.TestCase):
     def test_atomic_npy_and_masked_direct_summaries(self) -> None:
@@ -109,18 +131,14 @@ class ExtractionAndAtomicIoTest(unittest.TestCase):
                 nib.save(nib.Nifti1Image(mask, affine), path)
                 mask_paths.append(path)
 
+            jacobian_img = nib.load(jacobian_path)
+            vectors = extract_vectors(
+                mask_paths, jacobian_img, jacobian_values, num_workers=1
+            )
             subject_dir = root / "subject"
-            label_dir = subject_dir / "label_42"
-            export_vectors(mask_paths, jacobian_path, label_dir, num_workers=1, force=True)
             parcel_ids = ["label_42/roi_0001", "label_42/roi_0002"]
-            write_direct_summaries(subject_dir, parcel_ids)
+            write_direct_summaries(subject_dir, vectors, parcel_ids)
 
-            np.testing.assert_array_equal(
-                np.load(label_dir / "roi_0001.npy"), jacobian_values[0, 0, :]
-            )
-            np.testing.assert_array_equal(
-                np.load(label_dir / "roi_0002.npy"), jacobian_values[1, 1, :]
-            )
             np.testing.assert_allclose(
                 np.fromfile(subject_dir / "direct_mean.dat", dtype=np.float64),
                 [0.5, 6.5],

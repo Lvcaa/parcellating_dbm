@@ -1,0 +1,109 @@
+Bootstrap: docker
+From: python:3.12-slim
+
+%labels
+    Author Luca Galli
+    Description Parallel parcel-vector export for DBM log-Jacobian images
+    PythonVersion 3.12
+    NumPyVersion 2.1.3
+    NiBabelVersion 5.3.2
+
+%files
+    scripts/parcellation/export_masked_jacobian_vectors.py /opt/dbm/scripts/parcellation/export_masked_jacobian_vectors.py
+    scripts/pipeline_integrity.py /opt/dbm/scripts/pipeline_integrity.py
+
+%post
+    python -m pip install --no-cache-dir \
+        numpy==2.1.3 \
+        nibabel==5.3.2
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export PYTHONDONTWRITEBYTECODE=1
+
+    # Parallelism is provided explicitly by the exporter and its scheduler.
+    # Keep numerical libraries from silently adding another thread pool.
+    export OPENBLAS_NUM_THREADS=1
+    export OMP_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
+    export NUMEXPR_NUM_THREADS=1
+
+    export PROCESSES=4
+    export THREADS=25
+
+%runscript
+    set -eu
+
+    case "${PROCESSES:-}" in
+        ''|*[!0-9]*)
+            echo "PROCESSES must be a positive integer (got: ${PROCESSES:-unset})" >&2
+            exit 2
+            ;;
+    esac
+    case "${THREADS:-}" in
+        ''|*[!0-9]*)
+            echo "THREADS must be a positive integer (got: ${THREADS:-unset})" >&2
+            exit 2
+            ;;
+    esac
+    if [ "$PROCESSES" -lt 1 ] || [ "$THREADS" -lt 1 ]; then
+        echo "PROCESSES and THREADS must both be at least 1" >&2
+        exit 2
+    fi
+
+    if [ ! -d /data/jacobians ]; then
+        echo "Missing input mount: /data/jacobians" >&2
+        exit 2
+    fi
+    if [ ! -f /data/rois/atlas_manifest.json ]; then
+        echo "Missing validated ROI manifest: /data/rois/atlas_manifest.json" >&2
+        exit 2
+    fi
+    if [ ! -d /data/vectors ] || [ ! -w /data/vectors ]; then
+        echo "Missing writable output mount: /data/vectors" >&2
+        exit 2
+    fi
+
+    subject_count="$(find /data/jacobians \
+        -mindepth 2 -maxdepth 2 \
+        -type f -name '*_to_template_logJacobian.nii.gz' | wc -l)"
+    if [ "$subject_count" -lt 1 ]; then
+        echo "No Jacobian images found under /data/jacobians" >&2
+        exit 2
+    fi
+
+    echo "Parcel-vector export"
+    echo "Subjects: $subject_count"
+    echo "Processes: $PROCESSES"
+    echo "Threads per process: $THREADS"
+
+    stop_children() {
+        exit_status="$1"
+        trap - INT TERM
+        # With apptainer --pid, -1 addresses all signalable processes in this
+        # PID namespace. PID 1 then waits before exiting the namespace.
+        kill -TERM -1 2>/dev/null || true
+        wait || true
+        exit "$exit_status"
+    }
+    trap 'stop_children 130' INT
+    trap 'stop_children 143' TERM
+
+    find /data/jacobians \
+        -mindepth 2 -maxdepth 2 \
+        -type f -name '*_to_template_logJacobian.nii.gz' \
+        -print0 \
+        | sort -z \
+        | xargs -0 -r -n 1 -P "$PROCESSES" \
+            python /opt/dbm/scripts/parcellation/export_masked_jacobian_vectors.py \
+                --rois-dir /data/rois \
+                --output-dir /data/vectors \
+                --num-workers "$THREADS" \
+                --jacobian
+
+%test
+    python -c "import numpy, nibabel; assert numpy.__version__ == '2.1.3'; assert nibabel.__version__ == '5.3.2'"
+    python -m py_compile \
+        /opt/dbm/scripts/pipeline_integrity.py \
+        /opt/dbm/scripts/parcellation/export_masked_jacobian_vectors.py
+    python /opt/dbm/scripts/parcellation/export_masked_jacobian_vectors.py --help >/dev/null

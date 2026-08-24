@@ -122,25 +122,25 @@ python scripts/preprocessing/inspect_labels.py
 
 ### 2. Generate parcel masks
 
-[`scripts/parcellation/sub_parcels_equal_size.py`](scripts/parcellation/sub_parcels_equal_size.py)
-splits one anatomical ROI into approximately equal-sized parcels. It uses
-spatially constrained agglomerative clustering and writes binary NIfTI masks:
+[`scripts/parcellation/separate_cases/second_roi_test.py`](scripts/parcellation/separate_cases/second_roi_test.py)
+builds the retained labels sequentially with 6-connected graph coarsening.
+Within each label it writes masks with 75% of the detected CPUs. The safe
+default output is isolated from the current atlas:
 
 ```text
-outputs/rois/<label>/roi_XXXX.nii.gz
+outputs/test_parcellation/rois/<label>/roi_XXXX.nii.gz
 ```
 
-Example:
+Validate every label without writing files, then run the complete build:
 
 ```bash
-python scripts/parcellation/sub_parcels_equal_size.py \
-  --roi-label 10 \
-  --parcel-size 15 \
-  --skip-neighbor-check
+python scripts/parcellation/separate_cases/second_roi_test.py --validate-only
+python scripts/parcellation/separate_cases/second_roi_test.py
 ```
 
-The algorithm can allocate a large distance matrix for high-volume labels.
-Test smaller ROIs first and use the cluster recipes for memory-heavy runs.
+The legacy `sub_parcels_equal_size.py` implementation must not be used for
+atlas regeneration: its global balancing assignment can disconnect parcels
+and its dense distance matrix is infeasible for the largest labels.
 
 Useful companion scripts:
 
@@ -277,17 +277,18 @@ and atomic completion markers match.
 
 ### Parcellation
 
-- `sub_parcels_equal_size.py`: primary ROI splitting implementation.
+- `separate_cases/second_roi_test.py`: active connected atlas builder; labels
+  run sequentially and masks within a label are written in parallel.
+- `sub_parcels_equal_size.py`: legacy implementation retained only for
+  provenance; do not use for atlas regeneration.
 - `aggregate_parcels.py`: recombines parcel masks for coverage checks.
 - `assign_unique_labels.py`: assigns globally unique parcel filenames and
   creates the label lookup CSV.
 - `export_masked_jacobian_vectors.py`: extracts reusable per-parcel Jacobian
   vectors.
-- `separate_cases/second_roi_test.py`: experimental connected-region-growing
-  implementation for difficult ROIs.
 - `separate_cases/run_allowed_parcellations.py` and
-  `separate_cases/run_high_ram_labels.py`: intended batch runners for standard
-  and high-memory labels.
+  `separate_cases/run_high_ram_labels.py`: legacy wrappers; the active builder
+  now handles every retained label itself.
 
 ### Graph Building
 

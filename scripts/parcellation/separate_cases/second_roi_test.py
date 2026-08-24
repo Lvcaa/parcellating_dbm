@@ -1,29 +1,34 @@
 """
-Split one segmentation ROI with the alternative connected region-growing path.
+Build a connected approximately equal-size parcel atlas.
 
 Each approximately equal-sized parcel is written as a NIfTI mask under
-``<output-root>/<roi-label>/``.
+<output-root>/<roi-label>/.
+Labels are processed sequentially; NIfTI writing within each label is parallel.
 
 Usage:
     python scripts/parcellation/separate_cases/second_roi_test.py [options]
 
 Parameters:
-    --roi-label INT          Segmentation label to split (default: 10).
-    --parcel-size INT        Target voxels per parcel (default: 27).
+    --roi-label INT          Optional label; repeatable (default: all retained labels).
+    --parcel-size INT        Target voxels per parcel (default: 15).
     --segmentation PATH      Input segmentation image.
-    --output-root PATH       Root for ROI-specific folders (default: outputs/rois).
+    --output-root PATH       Root (default: outputs/test_parcellation/rois).
+    --workers INT            Parallel writers (default: 75% of detected CPUs).
     --skip-neighbor-check    Skip connectivity diagnostics.
 
 Examples:
     python scripts/parcellation/separate_cases/second_roi_test.py
-    python scripts/parcellation/separate_cases/second_roi_test.py --roi-label 42 --parcel-size 15 --skip-neighbor-check
+    python scripts/parcellation/separate_cases/second_roi_test.py --roi-label 24 --validate-only
 """
 
 import argparse
+import heapq
+import math
 import os
 import sys
 import time
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import nibabel as nib
@@ -31,12 +36,14 @@ import numpy as np
 from scipy import ndimage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from atlas_labels import KEEP_LABELS, LABEL_DICT
 from pipeline_integrity import atomic_write_json, file_signature, sha256_file
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SEGMENTATION = PROJECT_ROOT / "data" / "reference" / "MNI152_T1_1mm_seg.nii.gz"
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "rois"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "outputs" / "test_parcellation" / "rois"
+DEFAULT_WORKERS = max(1, math.floor((os.cpu_count() or 1) * 0.75))
 NEIGHBOR_DELTAS = np.array(
     [
         (-1, 0, 0),
@@ -52,18 +59,22 @@ NEIGHBOR_DELTAS = np.array(
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Split a segmentation ROI into approximately equal-sized sub-parcels."
+        description="Build a validated 6-connected parcel atlas."
     )
     parser.add_argument(
         "--roi-label",
         type=int,
-        default=10,
-        help="Segmentation label to parcelize.",
+        action="append",
+        default=None,
+        help=(
+            "Segmentation label to parcelize. Repeat to select several labels. "
+            "When omitted, every retained label is processed sequentially."
+        ),
     )
     parser.add_argument(
         "--parcel-size",
         type=int,
-        default=27,
+        default=15,
         help="Target number of voxels per sub-parcel.",
     )
     parser.add_argument(
@@ -81,7 +92,21 @@ def parse_args():
     parser.add_argument(
         "--skip-neighbor-check",
         action="store_true",
-        help="Skip the local connectivity diagnostic for each sub-parcel.",
+        help="Compatibility option; mandatory final connectivity validation still runs.",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=(
+            "Parallel NIfTI writer processes used within each label "
+            f"(default: 75%% of detected CPUs = {DEFAULT_WORKERS})."
+        ),
+    )
+    parser.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Build and validate parcels in memory without writing NIfTI masks.",
     )
     return parser.parse_args()
 
@@ -132,6 +157,51 @@ def write_nifti(roi_indices, sub_roi_index, template_img, output_dir):
     finally:
         temporary.unlink(missing_ok=True)
     return output_path
+
+
+_WRITER_TEMPLATE_IMAGE = None
+_WRITER_OUTPUT_DIR = None
+
+
+def initialize_writer(segmentation_path, output_dir):
+    """Load immutable NIfTI geometry once in each writer process."""
+    global _WRITER_TEMPLATE_IMAGE, _WRITER_OUTPUT_DIR
+    _WRITER_TEMPLATE_IMAGE = nib.load(str(segmentation_path))
+    _WRITER_OUTPUT_DIR = Path(output_dir)
+
+
+def write_parcel_worker(task):
+    """Write one parcel in a worker and return its validated manifest record."""
+    parcel_index, parcel_coords, target_size = task
+    output_path = write_nifti(
+        parcel_coords,
+        parcel_index,
+        _WRITER_TEMPLATE_IMAGE,
+        _WRITER_OUTPUT_DIR,
+    )
+    return {
+        "file": output_path.name,
+        "voxel_count": int(len(parcel_coords)),
+        "target_voxel_count": int(target_size),
+        "component_count_6": 1,
+        "sha256": sha256_file(output_path),
+    }
+
+
+def write_parcels_parallel(all_parcels, all_targets, segmentation_path, output_dir, workers):
+    """Write one label with a bounded process pool, preserving parcel order."""
+    tasks = (
+        (parcel_index, parcel_coords, target_size)
+        for parcel_index, (parcel_coords, target_size) in enumerate(
+            zip(all_parcels, all_targets)
+        )
+    )
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        initializer=initialize_writer,
+        initargs=(segmentation_path, output_dir),
+    ) as executor:
+        return list(executor.map(write_parcel_worker, tasks, chunksize=8))
 
 
 def parcel_targets(n_voxels, n_parcels):
@@ -345,8 +415,210 @@ def shortest_surplus_path(start_parcel, parcel_neighbors, parcel_sizes, targets)
     return None
 
 
+def members_are_connected(members, adjacency):
+    """Return whether a non-empty set of voxel indices is connected."""
+    if not members:
+        return False
+    if len(members) == 1:
+        return True
+
+    start = min(members)
+    queue = deque([start])
+    seen = {start}
+    while queue:
+        voxel_index = queue.popleft()
+        for neighbor_index in adjacency[voxel_index]:
+            if neighbor_index in members and neighbor_index not in seen:
+                seen.add(neighbor_index)
+                queue.append(neighbor_index)
+    return len(seen) == len(members)
+
+
+def connected_prefix(members, start, size, adjacency, preferred, reverse=False):
+    """Grow a deterministic connected prefix of the requested size."""
+    selected = set()
+    queued = {start}
+    queue = deque([start])
+
+    while queue and len(selected) < size:
+        voxel_index = queue.popleft()
+        selected.add(voxel_index)
+        neighbors = [
+            neighbor
+            for neighbor in adjacency[voxel_index]
+            if neighbor in members and neighbor not in queued
+        ]
+        neighbors.sort(
+            key=lambda neighbor: (neighbor not in preferred, neighbor),
+            reverse=reverse,
+        )
+        for neighbor in neighbors:
+            queued.add(neighbor)
+            queue.append(neighbor)
+
+    return selected
+
+
+def find_connected_bipartition(combined_members, first_members, first_size, adjacency):
+    """Split a small connected union into two connected sets of exact sizes."""
+    if first_size < 1 or first_size >= len(combined_members):
+        return None
+
+    # Starting inside the parcel that receives a voxel keeps repairs local. If
+    # that cannot produce a valid cut, try every vertex in the small union.
+    starts = sorted(first_members) + sorted(combined_members - first_members)
+    for preferred in (first_members, combined_members):
+        for reverse in (False, True):
+            for start in starts:
+                first = connected_prefix(
+                    combined_members,
+                    start,
+                    first_size,
+                    adjacency,
+                    preferred,
+                    reverse=reverse,
+                )
+                if len(first) != first_size:
+                    continue
+                second = combined_members - first
+                if members_are_connected(second, adjacency):
+                    return first, second
+    return None
+
+
+def transfer_voxels(
+    source_parcel,
+    destination_parcel,
+    amount,
+    owners,
+    parcel_members,
+    parcel_sizes,
+    adjacency,
+):
+    """Move several voxels, locally repartitioning the adjacent pair if needed."""
+    if amount < 1 or amount >= parcel_sizes[source_parcel]:
+        return False
+
+    saved_source = set(parcel_members[source_parcel])
+    saved_destination = set(parcel_members[destination_parcel])
+    saved_source_size = int(parcel_sizes[source_parcel])
+    saved_destination_size = int(parcel_sizes[destination_parcel])
+
+    direct_success = True
+    for _ in range(amount):
+        voxel_index = find_transfer_voxel(
+            source_parcel,
+            destination_parcel,
+            owners,
+            parcel_members,
+            adjacency,
+        )
+        if voxel_index is None:
+            direct_success = False
+            break
+        owners[voxel_index] = destination_parcel
+        parcel_members[source_parcel].remove(voxel_index)
+        parcel_members[destination_parcel].add(voxel_index)
+        parcel_sizes[source_parcel] -= 1
+        parcel_sizes[destination_parcel] += 1
+    if direct_success:
+        return True
+
+    parcel_members[source_parcel] = saved_source
+    parcel_members[destination_parcel] = saved_destination
+    parcel_sizes[source_parcel] = saved_source_size
+    parcel_sizes[destination_parcel] = saved_destination_size
+    owners[np.fromiter(saved_source, dtype=np.int64)] = source_parcel
+    owners[np.fromiter(saved_destination, dtype=np.int64)] = destination_parcel
+
+    combined = saved_source | saved_destination
+    split = find_connected_bipartition(
+        combined,
+        saved_destination,
+        saved_destination_size + amount,
+        adjacency,
+    )
+    if split is None:
+        return False
+
+    destination_members, source_members = split
+    parcel_members[destination_parcel] = destination_members
+    parcel_members[source_parcel] = source_members
+    owners[np.fromiter(destination_members, dtype=np.int64)] = destination_parcel
+    owners[np.fromiter(source_members, dtype=np.int64)] = source_parcel
+    parcel_sizes[destination_parcel] = len(destination_members)
+    parcel_sizes[source_parcel] = len(source_members)
+    return True
+
+
+def candidate_surplus_paths(
+    start_parcel,
+    parcel_neighbors,
+    parcel_sizes,
+    targets,
+    max_paths=32,
+):
+    """Return shortest candidate paths from a deficit to nearby surplus parcels."""
+    queue = deque([start_parcel])
+    predecessors = {start_parcel: None}
+    paths = []
+
+    while queue and len(paths) < max_paths:
+        parcel_id = queue.popleft()
+        if parcel_id != start_parcel and parcel_sizes[parcel_id] > targets[parcel_id]:
+            path = []
+            cursor = parcel_id
+            while cursor is not None:
+                path.append(cursor)
+                cursor = predecessors[cursor]
+            paths.append(list(reversed(path)))
+            continue
+
+        for neighbor_id in sorted(parcel_neighbors[parcel_id]):
+            if neighbor_id not in predecessors:
+                predecessors[neighbor_id] = parcel_id
+                queue.append(neighbor_id)
+
+    return paths
+
+
+def try_transfer_path(path, amount, owners, parcel_members, parcel_sizes, adjacency):
+    """Transactionally propagate an amount from a surplus to a deficit."""
+    affected = set(path)
+    saved_members = {
+        parcel_id: set(parcel_members[parcel_id])
+        for parcel_id in affected
+    }
+    saved_sizes = {
+        parcel_id: int(parcel_sizes[parcel_id])
+        for parcel_id in affected
+    }
+
+    for path_index in range(len(path) - 1, 0, -1):
+        source_parcel = path[path_index]
+        destination_parcel = path[path_index - 1]
+        if transfer_voxels(
+            source_parcel,
+            destination_parcel,
+            amount,
+            owners,
+            parcel_members,
+            parcel_sizes,
+            adjacency,
+        ):
+            continue
+
+        for parcel_id, members in saved_members.items():
+            parcel_members[parcel_id] = members
+            parcel_sizes[parcel_id] = saved_sizes[parcel_id]
+            owners[np.fromiter(members, dtype=np.int64)] = parcel_id
+        return False
+
+    return True
+
+
 def rebalance_connected_parcels(owners, adjacency, targets):
-    """Iteratively transfer boundary voxels along shortest paths to even out under-sized parcels."""
+    """Reach exact targets using transactional, connectivity-preserving repairs."""
     n_parcels = len(targets)
     parcel_members = build_parcel_members(owners, n_parcels)
     parcel_sizes = np.array([len(members) for members in parcel_members], dtype=np.int32)
@@ -361,34 +633,262 @@ def rebalance_connected_parcels(owners, adjacency, targets):
         deficit_order = sorted(deficits, key=lambda parcel_id: targets[parcel_id] - parcel_sizes[parcel_id], reverse=True)
 
         for target_parcel in deficit_order:
-            path = shortest_surplus_path(int(target_parcel), parcel_neighbors, parcel_sizes, targets)
-            if not path or len(path) == 1:
+            if parcel_sizes[target_parcel] >= targets[target_parcel]:
                 continue
-
-            moved = True
-            for path_index in range(len(path) - 1, 0, -1):
-                source_parcel = path[path_index]
-                destination_parcel = path[path_index - 1]
-                voxel_index = find_transfer_voxel(
-                    source_parcel,
-                    destination_parcel,
-                    owners,
-                    parcel_members,
-                    adjacency,
+            while parcel_sizes[target_parcel] < targets[target_parcel]:
+                paths = candidate_surplus_paths(
+                    int(target_parcel),
+                    parcel_neighbors,
+                    parcel_sizes,
+                    targets,
                 )
-                if voxel_index is None:
-                    moved = False
+                moved = False
+                deficit = int(targets[target_parcel] - parcel_sizes[target_parcel])
+                for path in paths:
+                    donor = path[-1]
+                    donor_surplus = int(parcel_sizes[donor] - targets[donor])
+                    max_amount = min(deficit, donor_surplus)
+                    for amount in range(max_amount, 0, -1):
+                        if try_transfer_path(
+                            path,
+                            amount,
+                            owners,
+                            parcel_members,
+                            parcel_sizes,
+                            adjacency,
+                        ):
+                            moved = True
+                            break
+                    if moved:
+                        break
+                if not moved:
                     break
-
-                owners[voxel_index] = destination_parcel
-                parcel_members[source_parcel].remove(voxel_index)
-                parcel_members[destination_parcel].add(voxel_index)
-                parcel_sizes[source_parcel] -= 1
-                parcel_sizes[destination_parcel] += 1
-
-            if moved:
                 progress = True
 
+        if not progress:
+            break
+
+    if not np.array_equal(parcel_sizes, targets):
+        deficits = np.flatnonzero(parcel_sizes < targets)
+        surpluses = np.flatnonzero(parcel_sizes > targets)
+        largest_deficit = int(np.max(targets[deficits] - parcel_sizes[deficits])) if len(deficits) else 0
+        largest_surplus = int(np.max(parcel_sizes[surpluses] - targets[surpluses])) if len(surpluses) else 0
+        raise RuntimeError(
+            "Could not reach connected parcel targets: "
+            f"{len(deficits)} deficits (largest={largest_deficit}), "
+            f"{len(surpluses)} surpluses (largest={largest_surplus})"
+        )
+
+    return owners
+
+
+def coarsen_connected_graph(adjacency, n_parcels):
+    """Merge adjacent voxel clusters until exactly n_parcels remain."""
+    n_voxels = len(adjacency)
+    parents = np.arange(n_voxels, dtype=np.int32)
+    sizes = np.ones(n_voxels, dtype=np.int32)
+    rng = np.random.default_rng(4)
+    masses = rng.lognormal(mean=0.0, sigma=0.025, size=n_voxels)
+    neighbors = [set(voxel_neighbors) for voxel_neighbors in adjacency]
+    heap = [
+        (masses[left] + masses[right], left, right)
+        for left, voxel_neighbors in enumerate(adjacency)
+        for right in voxel_neighbors
+        if left < right
+    ]
+    heapq.heapify(heap)
+    cluster_count = n_voxels
+
+    def find_root(voxel_index):
+        while parents[voxel_index] != voxel_index:
+            parents[voxel_index] = parents[parents[voxel_index]]
+            voxel_index = int(parents[voxel_index])
+        return voxel_index
+
+    while cluster_count > n_parcels:
+        while heap:
+            stored_mass, left, right = heapq.heappop(heap)
+            left = find_root(left)
+            right = find_root(right)
+            current_mass = masses[left] + masses[right]
+            if (
+                left != right
+                and right in neighbors[left]
+                and abs(stored_mass - current_mass) <= 1e-12
+            ):
+                break
+        else:
+            raise RuntimeError(
+                f"Connected coarsening stopped at {cluster_count} clusters; "
+                f"requested {n_parcels}"
+            )
+
+        if sizes[left] < sizes[right]:
+            left, right = right, left
+        parents[right] = left
+        sizes[left] += sizes[right]
+        masses[left] += masses[right]
+        cluster_count -= 1
+
+        merged_neighbors = (neighbors[left] | neighbors[right]) - {left, right}
+        neighbors[left] = set()
+        for old_neighbor in merged_neighbors:
+            neighbor = find_root(old_neighbor)
+            if neighbor == left:
+                continue
+            neighbors[neighbor].discard(left)
+            neighbors[neighbor].discard(right)
+            neighbors[neighbor].add(left)
+            neighbors[left].add(neighbor)
+            heapq.heappush(
+                heap,
+                (
+                    masses[left] + masses[neighbor],
+                    min(left, neighbor),
+                    max(left, neighbor),
+                ),
+            )
+        neighbors[right].clear()
+
+    roots = np.array([find_root(index) for index in range(n_voxels)], dtype=np.int32)
+    _, owners = np.unique(roots, return_inverse=True)
+    return owners.astype(np.int32, copy=False)
+
+
+def balance_adjacent_parcels(owners, adjacency, n_parcels):
+    """Reduce local size differences by repartitioning adjacent parcel pairs."""
+    parcel_members = build_parcel_members(owners, n_parcels)
+    parcel_sizes = np.array([len(members) for members in parcel_members], dtype=np.int32)
+
+    while True:
+        parcel_neighbors = parcel_adjacency(owners, adjacency, n_parcels)
+        edges = sorted(
+            (
+                abs(int(parcel_sizes[left]) - int(parcel_sizes[right])),
+                left,
+                right,
+            )
+            for left, adjacent in enumerate(parcel_neighbors)
+            for right in adjacent
+            if left < right and abs(int(parcel_sizes[left]) - int(parcel_sizes[right])) >= 2
+        )
+        moves = 0
+        for _, left, right in reversed(edges):
+            difference = int(parcel_sizes[left]) - int(parcel_sizes[right])
+            if abs(difference) < 2:
+                continue
+            source, destination = (left, right) if difference > 0 else (right, left)
+            amount = abs(difference) // 2
+            if transfer_voxels(
+                source,
+                destination,
+                amount,
+                owners,
+                parcel_members,
+                parcel_sizes,
+                adjacency,
+            ):
+                moves += 1
+        if moves == 0:
+            return owners, parcel_members, parcel_sizes
+
+
+def candidate_receiver_paths(start_parcel, parcel_neighbors, parcel_sizes, upper_bound):
+    """Return paths from an overfull parcel to nearby parcels with spare capacity."""
+    queue = deque([start_parcel])
+    predecessors = {start_parcel: None}
+    paths = []
+
+    while queue and len(paths) < 128:
+        parcel_id = queue.popleft()
+        if parcel_id != start_parcel and parcel_sizes[parcel_id] < upper_bound:
+            path = []
+            cursor = parcel_id
+            while cursor is not None:
+                path.append(cursor)
+                cursor = predecessors[cursor]
+            paths.append(list(reversed(path)))
+            continue
+        for neighbor_id in sorted(parcel_neighbors[parcel_id]):
+            if neighbor_id not in predecessors:
+                predecessors[neighbor_id] = parcel_id
+                queue.append(neighbor_id)
+    return paths
+
+
+def balance_to_size_bounds(
+    owners,
+    adjacency,
+    parcel_members,
+    parcel_sizes,
+    lower_bound,
+    upper_bound,
+):
+    """Move mass along parcel paths until every parcel is inside fixed bounds."""
+    n_parcels = len(parcel_sizes)
+    lower_targets = np.full(n_parcels, lower_bound, dtype=np.int32)
+
+    while np.any(parcel_sizes < lower_bound):
+        progress = False
+        parcel_neighbors = parcel_adjacency(owners, adjacency, n_parcels)
+        deficits = sorted(
+            np.flatnonzero(parcel_sizes < lower_bound),
+            key=lambda parcel_id: parcel_sizes[parcel_id],
+        )
+        for destination in deficits:
+            if parcel_sizes[destination] >= lower_bound:
+                continue
+            paths = candidate_surplus_paths(
+                int(destination),
+                parcel_neighbors,
+                parcel_sizes,
+                lower_targets,
+                max_paths=128,
+            )
+            for path in paths:
+                source = path[-1]
+                amount = min(
+                    lower_bound - int(parcel_sizes[destination]),
+                    int(parcel_sizes[source]) - lower_bound,
+                )
+                if amount > 0 and try_transfer_path(
+                    path,
+                    amount,
+                    owners,
+                    parcel_members,
+                    parcel_sizes,
+                    adjacency,
+                ):
+                    progress = True
+                    break
+        if not progress:
+            break
+
+    while np.any(parcel_sizes > upper_bound):
+        progress = False
+        parcel_neighbors = parcel_adjacency(owners, adjacency, n_parcels)
+        for source in np.flatnonzero(parcel_sizes > upper_bound):
+            if parcel_sizes[source] <= upper_bound:
+                continue
+            for outward_path in candidate_receiver_paths(
+                int(source), parcel_neighbors, parcel_sizes, upper_bound
+            ):
+                destination = outward_path[-1]
+                amount = min(
+                    int(parcel_sizes[source]) - upper_bound,
+                    upper_bound - int(parcel_sizes[destination]),
+                )
+                transfer_path = list(reversed(outward_path))
+                if amount > 0 and try_transfer_path(
+                    transfer_path,
+                    amount,
+                    owners,
+                    parcel_members,
+                    parcel_sizes,
+                    adjacency,
+                ):
+                    progress = True
+                    break
         if not progress:
             break
 
@@ -396,16 +896,44 @@ def rebalance_connected_parcels(owners, adjacency, targets):
 
 
 def grow_component(coords, n_parcels):
-    """Parcellate one connected component: seed → BFS grow → rebalance."""
+    """Parcellate one component with connected coarsening and bounded repair."""
     if n_parcels == 1:
         return np.zeros(len(coords), dtype=np.int32)
 
     adjacency = build_adjacency(coords)
     targets = parcel_targets(len(coords), n_parcels)
-    seeds = choose_seed_indices(coords, n_parcels)
-    owners = grow_connected_parcels(adjacency, targets, seeds)
-    owners = rebalance_connected_parcels(owners, adjacency, targets)
-    return owners
+    owners = coarsen_connected_graph(adjacency, n_parcels)
+    owners, parcel_members, parcel_sizes = balance_adjacent_parcels(
+        owners, adjacency, n_parcels
+    )
+    preferred_lower = max(1, int(targets.min()) - 1)
+    preferred_upper = int(targets.max()) + 1
+    owners = balance_to_size_bounds(
+        owners,
+        adjacency,
+        parcel_members,
+        parcel_sizes,
+        preferred_lower,
+        preferred_upper,
+    )
+
+    sizes = np.bincount(owners, minlength=n_parcels)
+    hard_lower = max(1, int(targets.min()) - 4)
+    hard_upper = int(targets.max()) + 3
+    if sizes.min() < hard_lower or sizes.max() > hard_upper:
+        raise RuntimeError(
+            f"Could not satisfy connected hard size bounds {hard_lower}-{hard_upper}; "
+            f"observed {int(sizes.min())}-{int(sizes.max())}"
+        )
+    old_ids = sorted(
+        range(n_parcels),
+        key=lambda parcel_id: (-sizes[parcel_id], parcel_id),
+    )
+    new_id_for_old = np.empty(n_parcels, dtype=np.int32)
+    new_id_for_old[np.asarray(old_ids, dtype=np.int32)] = np.arange(
+        n_parcels, dtype=np.int32
+    )
+    return new_id_for_old[owners]
 
 
 def connected_subcomponents(coords):
@@ -446,17 +974,12 @@ def check_neigh(roi_coords_in_voxel):
         )
 
 
-def main():
-    args = parse_args()
-
-    if args.parcel_size < 1:
-        raise ValueError("--parcel-size must be at least 1")
-
-    template_img, seg_image = load_segmentation(args.segmentation)
-    roi_mask = seg_image == args.roi_label
+def parcellate_label(args, label, template_img, seg_image):
+    """Build, validate, and optionally write one anatomical label."""
+    roi_mask = seg_image == label
 
     if not np.any(roi_mask):
-        raise ValueError(f"ROI label {args.roi_label} not found in {args.segmentation}")
+        raise ValueError(f"ROI label {label} not found in {args.segmentation}")
 
     structure = six_connectivity_structure()
     component_map, n_components = ndimage.label(roi_mask.astype(np.uint8), structure=structure)
@@ -493,8 +1016,9 @@ def main():
     print(f"Parcellation time: {time.time() - start_time:.3f} s")
 
     parcel_sizes = np.array([len(parcel) for parcel in all_parcels], dtype=np.int32)
-    if not np.array_equal(parcel_sizes, np.asarray(all_targets, dtype=np.int32)):
-        raise RuntimeError("Connected rebalancing did not reach the assigned parcel target sizes")
+    parcel_sizes_match_targets = np.array_equal(
+        parcel_sizes, np.asarray(all_targets, dtype=np.int32)
+    )
     print(f"Parcel size range: {int(parcel_sizes.min())} - {int(parcel_sizes.max())}")
 
     component_counts = [connected_subcomponents(parcel) for parcel in all_parcels]
@@ -505,7 +1029,19 @@ def main():
     if len(np.unique(stacked, axis=0)) != len(roi_coords):
         raise RuntimeError("Parcels overlap or do not cover the source ROI exactly")
 
-    output_dir = args.output_root / str(args.roi_label)
+    summary = {
+        "label": int(label),
+        "source_voxel_count": int(len(roi_coords)),
+        "parcel_count": len(all_parcels),
+        "parcel_size_min": int(parcel_sizes.min()),
+        "parcel_size_max": int(parcel_sizes.max()),
+        "parcel_sizes_match_targets": bool(parcel_sizes_match_targets),
+    }
+    if args.validate_only:
+        print(f"Validated label {label} in memory; no files written.")
+        return summary
+
+    output_dir = args.output_root / str(label)
     existing = list(output_dir.glob("roi_*.nii.gz")) if output_dir.exists() else []
     if existing:
         raise FileExistsError(
@@ -513,35 +1049,101 @@ def main():
         )
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    parcel_records = []
-    for parcel_index, (parcel_coords, target_size) in enumerate(zip(all_parcels, all_targets)):
-        if not args.skip_neighbor_check:
-            check_neigh(parcel_coords)
-        output_path = write_nifti(parcel_coords, parcel_index, template_img, output_dir)
-        parcel_records.append({
-            "file": output_path.name,
-            "voxel_count": int(len(parcel_coords)),
-            "target_voxel_count": target_size,
-            "component_count_6": 1,
-            "sha256": sha256_file(output_path),
-        })
+    print(f"Writing {len(all_parcels)} masks with {args.workers} workers")
+    parcel_records = write_parcels_parallel(
+        all_parcels,
+        all_targets,
+        args.segmentation,
+        output_dir,
+        args.workers,
+    )
 
-    atomic_write_json(output_dir / "label_manifest.json", {
-        "schema_version": 1,
+    manifest_path = output_dir / "label_manifest.json"
+    atomic_write_json(manifest_path, {
+        "schema_version": 2,
         "validation_status": "passed",
-        "label": int(args.roi_label),
-        "source_segmentation": file_signature(args.segmentation, include_sha256=False),
+        "algorithm": "adjacency_constrained_weighted_coarsening",
+        "label": int(label),
+        "label_name": LABEL_DICT[label],
+        "source_segmentation": file_signature(args.segmentation, include_sha256=True),
         "source_voxel_count": int(len(roi_coords)),
         "parcel_count": len(parcel_records),
         "parcel_size_target": int(args.parcel_size),
         "parcel_size_min": int(parcel_sizes.min()),
         "parcel_size_max": int(parcel_sizes.max()),
-        "parcel_sizes_match_targets": True,
+        "parcel_sizes_match_targets": bool(parcel_sizes_match_targets),
+        "size_policy": {
+            "preferred_tolerance_voxels": 1,
+            "hard_lower_tolerance_voxels": 4,
+            "hard_upper_tolerance_voxels": 3,
+            "small_source_components_remain_single_connected_parcels": True,
+        },
         "connectivity": 6,
         "coverage_exact": True,
         "overlap_voxels": 0,
+        "workers": int(args.workers),
         "parcels": parcel_records,
     })
+    summary["manifest_sha256"] = sha256_file(manifest_path)
+    print(f"Validated and wrote label {label}: {output_dir}")
+    return summary
+
+
+def main():
+    args = parse_args()
+    if args.parcel_size < 1:
+        raise ValueError("--parcel-size must be at least 1")
+    if args.workers < 1:
+        raise ValueError("--workers must be at least 1")
+
+    production_rois = (PROJECT_ROOT / "outputs" / "rois").resolve()
+    if not args.validate_only and args.output_root.resolve() == production_rois:
+        raise ValueError(
+            "Refusing to write this test atlas into outputs/rois; "
+            f"use the isolated default {DEFAULT_OUTPUT_ROOT}"
+        )
+
+    labels = list(args.roi_label) if args.roi_label else list(KEEP_LABELS)
+    if len(labels) != len(set(labels)):
+        raise ValueError(f"Duplicate --roi-label values: {labels}")
+    unknown_labels = sorted(set(labels) - set(KEEP_LABELS))
+    if unknown_labels:
+        raise ValueError(f"Labels are not retained atlas labels: {unknown_labels}")
+
+    detected_cpus = os.cpu_count() or 1
+    print(f"Detected CPUs: {detected_cpus}")
+    print(f"Writer workers: {args.workers} ({args.workers / detected_cpus:.0%} of CPUs)")
+    print(f"Output root: {args.output_root.resolve()}")
+    print(f"Labels processed sequentially: {labels}")
+    if args.validate_only:
+        print("Validation-only mode: no output files will be written")
+    else:
+        args.output_root.mkdir(parents=True, exist_ok=True)
+
+    template_img, seg_image = load_segmentation(args.segmentation)
+    summaries = []
+    for index, label in enumerate(labels, start=1):
+        print(
+            f"\n[{index}/{len(labels)}] Label {label}: {LABEL_DICT[label]}",
+            flush=True,
+        )
+        summaries.append(parcellate_label(args, label, template_img, seg_image))
+
+    if not args.validate_only and labels == list(KEEP_LABELS):
+        manifest_path = args.output_root / "atlas_manifest.json"
+        atomic_write_json(manifest_path, {
+            "schema_version": 2,
+            "validation_status": "passed",
+            "algorithm": "adjacency_constrained_weighted_coarsening",
+            "labels_processed_sequentially": True,
+            "writer_workers": int(args.workers),
+            "source_segmentation": file_signature(args.segmentation, include_sha256=True),
+            "parcel_size_target": int(args.parcel_size),
+            "labels": summaries,
+        })
+        print(f"Atlas manifest: {manifest_path}")
+
+    print("All requested labels validated successfully.")
 
 
 if __name__ == "__main__":

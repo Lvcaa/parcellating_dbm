@@ -1,9 +1,15 @@
 """
-Extract parcel-level Jacobian vectors and save one ``.npy`` file per mask.
+Extract parcel-level Jacobian vectors into one concatenated memmap per subject.
 
 The script supports a single Jacobian image or batch processing of matching
-images in a directory. Outputs are written under
-``<output-dir>/<subject-id>/label_<label>/``.
+images in a directory. Outputs are written under ``<output-dir>/<subject-id>/``
+as ``parcel_vectors.dat`` (float32, every parcel end to end) plus
+``parcel_offsets.dat`` (int64, length n_parcels + 1). Parcel ``i`` of
+``parcel_order.txt`` is ``data[offsets[i]:offsets[i + 1]]``.
+
+Parcels are ~60 bytes each, so one file per parcel cost 128 bytes of .npy
+header and a full 4K block apiece: 381 GB and 99M files for a 1188-subject
+cohort, against 9.5 GB and 7k files this way.
 
 Usage:
     python scripts/parcellation/export_masked_jacobian_vectors.py [options]
@@ -47,7 +53,6 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pipeline_integrity import (
-    atomic_save_npy,
     atomic_write_raw,
     atomic_write_text,
     file_signature,
@@ -69,6 +74,10 @@ DEFAULT_ROI_MANIFEST_NAME = "atlas_manifest.json"
 DIRECT_MEAN_FILENAME = "direct_mean.dat"
 DIRECT_MEDIAN_FILENAME = "direct_median.dat"
 PARCEL_ORDER_FILENAME = "parcel_order.txt"
+VECTOR_DATA_FILENAME = "parcel_vectors.dat"
+VECTOR_OFFSETS_FILENAME = "parcel_offsets.dat"
+VECTOR_DTYPE = "float32"
+OFFSET_DTYPE = "int64"
 
 LABEL_NAMES = {
     3: "Left cerebral cortex",
@@ -101,8 +110,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Load the Jacobian image once, extract masked parcel vectors, and save "
-            "one .npy file per parcel. By default this exports all parcels from all "
-            "available ROI label folders under --rois-dir."
+            "them as one concatenated memmap per subject. By default this exports all "
+            "parcels from all available ROI label folders under --rois-dir."
         )
     )
     parser.add_argument(
@@ -130,7 +139,7 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help=f"Directory where .npy vectors will be saved (default: {DEFAULT_OUTPUT_DIR}).",
+        help=f"Directory where subject vector memmaps will be saved (default: {DEFAULT_OUTPUT_DIR}).",
     )
     parser.add_argument(
         "--label",
@@ -197,9 +206,13 @@ def process_jacobian_paths(input_dir: Path) -> list[Path]:
     if not input_dir.is_dir():
         raise ValueError(f"Input directory does not exist: {input_dir}")
 
-    jacobian_paths = sorted(input_dir.glob("subToMNI_relative_logJac_*.nii.gz"))
-    if not jacobian_paths:
-        jacobian_paths = sorted(input_dir.glob("subToMNI_relative_logJac_*.nii"))
+    patterns = (
+        "subToMNI_relative_logJac_*.nii.gz",
+        "subToMNI_relative_logJac_*.nii",
+        "sub-*/sub-*_to_template_logJacobian.nii.gz",
+        "sub-*/sub-*_to_template_logJacobian.nii",
+    )
+    jacobian_paths = sorted({path for pattern in patterns for path in input_dir.glob(pattern)})
     if not jacobian_paths:
         raise ValueError(f"No Jacobian images found in {input_dir}")
     return jacobian_paths
@@ -285,47 +298,15 @@ def select_parcel_paths(label_dir: Path, n_parcels: int | None, sample_mode: str
     return parcel_paths[:n_parcels]
 
 
-def parcel_output_path(output_dir: Path, parcel_path: Path) -> Path:
-    return output_dir / f"{parcel_path.stem.replace('.nii', '')}.npy"
-
-
-def export_vectors(
+def extract_vectors(
     parcel_paths: list[Path],
-    jacobian_path: Path,
-    output_dir: Path,
+    jacobian_img: nib.Nifti1Image,
+    jacobian_data: np.ndarray,
     num_workers: int,
-    force: bool = False,
-) -> None:
-    pending_parcel_paths = [
-        parcel_path
-        for parcel_path in parcel_paths
-        if force or not parcel_output_path(output_dir, parcel_path).is_file()
-    ]
-    skipped_count = len(parcel_paths) - len(pending_parcel_paths)
-    if skipped_count:
-        print(
-            f"Skipping {skipped_count} parcel vector(s) already present in {output_dir}",
-            flush=True,
-        )
-    if not pending_parcel_paths:
-        print(f"All requested parcel vectors already exist in {output_dir}", flush=True)
-        return
+) -> list[np.ndarray]:
+    """Return one float32 vector per parcel, in the order given."""
 
-    # Load the Jacobian image once and keep it in memory for all parcel processing
-    jacobian_img = nib.load(str(jacobian_path))
-
-    # Preload the Jacobian data into memory to avoid repeated disk access during masking
-    jacobian_data = jacobian_img.get_fdata()
-
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"Loaded Jacobian image once from {jacobian_path}", flush=True)
-    print(f"Writing .npy vectors to {output_dir}", flush=True)
-    print(f"Worker threads: {num_workers}", flush=True)
-
-    def export_single_parcel(index_and_path: tuple[int, Path]) -> tuple[int, str, tuple[int, ...]]:
-        index, parcel_path = index_and_path
-
+    def extract_single_parcel(parcel_path: Path) -> np.ndarray:
         # Load the parcel image and validate its shape and affine against the Jacobian image
         parcel_img = nib.load(str(parcel_path))
         if parcel_img.shape != jacobian_img.shape:
@@ -335,11 +316,8 @@ def export_vectors(
         if not np.allclose(parcel_img.affine, jacobian_img.affine):
             raise ValueError(f"Affine mismatch for {parcel_path}")
 
-        # Create a boolean mask where the parcel image has values greater than 0
-        mask = parcel_img.get_fdata() > 0
-
-        # Extract the Jacobian values at the masked locations and convert to float32 for efficient storage
-        vector = jacobian_data[mask].astype(np.float32, copy=False)
+        # Extract the Jacobian values inside the mask, as float32 for compact storage
+        vector = jacobian_data[parcel_img.get_fdata() > 0].astype(np.float32, copy=False)
 
         if vector.ndim != 1:
             raise ValueError(f"Expected a 1D masked vector for {parcel_path}, got shape {vector.shape}")
@@ -347,21 +325,12 @@ def export_vectors(
             raise ValueError(f"Parcel mask contains no voxels: {parcel_path}")
         if not np.isfinite(vector).all():
             raise ValueError(f"Masked log-Jacobian vector contains non-finite values: {parcel_path}")
+        return vector
 
-        # Save the extracted vector to a .npy file named after the parcel
-        output_path = parcel_output_path(output_dir, parcel_path)
-        atomic_save_npy(output_path, vector)
-        return index, output_path.name, vector.shape
-
-    indexed_paths = list(enumerate(pending_parcel_paths, start=1))
-    max_workers = min(num_workers, len(indexed_paths)) if indexed_paths else 1
+    # executor.map preserves input order, so the results line up with parcel_paths.
+    max_workers = min(num_workers, len(parcel_paths)) if parcel_paths else 1
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        for index, output_name, vector_shape in executor.map(export_single_parcel, indexed_paths):
-            print(
-                f"[{index:03d}/{len(pending_parcel_paths):03d}] saved "
-                f"{output_name} with shape {vector_shape}",
-                flush=True,
-            )
+        return list(executor.map(extract_single_parcel, parcel_paths))
 
 
 def parcel_ids_for_exports(label_exports: list[tuple[int, list[Path]]]) -> list[str]:
@@ -373,7 +342,7 @@ def parcel_ids_for_exports(label_exports: list[tuple[int, list[Path]]]) -> list[
 
 
 def load_atlas_contract(args: argparse.Namespace, parcel_ids: list[str]) -> tuple[dict, str]:
-    """Require outputs/rois/atlas_manifest.json (from check_roi_counts.py) to show every label ok."""
+    """Require either the legacy count contract or the validated connected-atlas contract."""
     manifest_path = args.roi_manifest or args.rois_dir / DEFAULT_ROI_MANIFEST_NAME
     if not manifest_path.is_file():
         if not args.allow_unvalidated_rois:
@@ -384,7 +353,13 @@ def load_atlas_contract(args: argparse.Namespace, parcel_ids: list[str]) -> tupl
         return {"atlas_id": "UNVALIDATED", "parcel_count": len(parcel_ids)}, "UNVALIDATED"
 
     atlas = read_json(manifest_path)
-    if not atlas.get("all_ok"):
+    legacy_valid = atlas.get("all_ok") is True
+    connected_valid = (
+        atlas.get("schema_version") == 2
+        and atlas.get("validation_status") == "passed"
+        and atlas.get("labels_processed_sequentially") is True
+    )
+    if not (legacy_valid or connected_valid):
         bad_labels = sorted(
             row.get("label") for row in atlas.get("labels", []) if row.get("status") != "ok"
         )
@@ -392,7 +367,47 @@ def load_atlas_contract(args: argparse.Namespace, parcel_ids: list[str]) -> tupl
             f"ROI count check has not passed for labels {bad_labels}: {manifest_path}. "
             "Re-run scripts/validation/check_roi_counts.py."
         )
-    return atlas, sha256_file(manifest_path)
+    manifest_hash = sha256_file(manifest_path)
+    if connected_valid:
+        expected_counts: dict[int, int] = {}
+        for parcel_id in parcel_ids:
+            label = int(parcel_id.split("/", 1)[0].removeprefix("label_"))
+            expected_counts[label] = expected_counts.get(label, 0) + 1
+        manifest_rows = {int(row["label"]): row for row in atlas.get("labels", [])}
+        manifest_counts = {
+            label: int(row["parcel_count"])
+            for label, row in manifest_rows.items()
+        }
+        mismatches = {
+            label: (count, manifest_counts.get(label))
+            for label, count in expected_counts.items()
+            if (
+                count > manifest_counts.get(label, -1)
+                or (args.n_parcels is None and count != manifest_counts.get(label))
+            )
+        }
+        if mismatches:
+            raise ValueError(
+                f"Selected parcel counts do not match the validated atlas: {mismatches}"
+            )
+
+        for label in expected_counts:
+            row = manifest_rows[label]
+            label_manifest_path = args.rois_dir / str(label) / "label_manifest.json"
+            if not label_manifest_path.is_file():
+                raise ValueError(f"Missing label manifest: {label_manifest_path}")
+            if sha256_file(label_manifest_path) != row.get("manifest_sha256"):
+                raise ValueError(f"Label manifest hash mismatch: {label_manifest_path}")
+            label_manifest = read_json(label_manifest_path)
+            if (
+                label_manifest.get("validation_status") != "passed"
+                or int(label_manifest.get("label", -1)) != label
+                or int(label_manifest.get("parcel_count", -1)) != manifest_counts[label]
+            ):
+                raise ValueError(f"Invalid label manifest: {label_manifest_path}")
+
+        atlas.setdefault("atlas_id", manifest_hash)
+    return atlas, manifest_hash
 
 
 def subject_is_complete(
@@ -413,32 +428,23 @@ def subject_is_complete(
     try:
         validate_raw_vector(subject_dir / DIRECT_MEAN_FILENAME, length=len(parcel_ids))
         validate_raw_vector(subject_dir / DIRECT_MEDIAN_FILENAME, length=len(parcel_ids))
-        expected_paths = {subject_dir / f"{parcel_id}.npy" for parcel_id in parcel_ids}
-        discovered_paths = set(subject_dir.glob("label_*/roi_*.npy"))
-        if discovered_paths != expected_paths:
+
+        # The offsets index pins the expected size of the concatenated vector block.
+        offsets = validate_raw_vector(
+            subject_dir / VECTOR_OFFSETS_FILENAME, length=len(parcel_ids) + 1, dtype=OFFSET_DTYPE
+        )
+        expected_bytes = int(offsets[-1]) * np.dtype(VECTOR_DTYPE).itemsize
+        if (subject_dir / VECTOR_DATA_FILENAME).stat().st_size != expected_bytes:
             return False
-        for vector_path in expected_paths:
-            vector = np.load(vector_path, allow_pickle=False).reshape(-1)
-            if vector.size == 0 or not np.isfinite(vector).all():
-                return False
     except (OSError, ValueError):
         return False
     return True
 
 
-def write_direct_summaries(subject_dir: Path, parcel_ids: list[str]) -> None:
-    means = np.empty(len(parcel_ids), dtype=np.float64)
-    medians = np.empty(len(parcel_ids), dtype=np.float64)
-    for index, parcel_id in enumerate(parcel_ids):
-        vector_path = subject_dir / f"{parcel_id}.npy"
-        try:
-            vector = np.load(vector_path, allow_pickle=False).reshape(-1)
-        except Exception as error:
-            raise ValueError(f"Unreadable parcel vector: {vector_path}") from error
-        if vector.size == 0 or not np.isfinite(vector).all():
-            raise ValueError(f"Invalid parcel vector: {vector_path}")
-        means[index] = float(np.mean(vector, dtype=np.float64))
-        medians[index] = float(np.median(vector))
+def write_direct_summaries(subject_dir: Path, vectors: list[np.ndarray], parcel_ids: list[str]) -> None:
+    # The vectors are already in memory, so no need to read back what we just wrote.
+    means = np.array([np.mean(vector, dtype=np.float64) for vector in vectors], dtype=np.float64)
+    medians = np.array([np.median(vector) for vector in vectors], dtype=np.float64)
 
     atomic_write_raw(subject_dir / DIRECT_MEAN_FILENAME, means, "float64")
     atomic_write_raw(subject_dir / DIRECT_MEDIAN_FILENAME, medians, "float64")
@@ -465,22 +471,33 @@ def export_subject(
         print(f"Validated parcel-vector output already complete: {subject_dir}", flush=True)
         return
 
-    # No matching completion marker means every existing vector is untrusted.
+    subject_dir.mkdir(parents=True, exist_ok=True)
+
+    # Load the Jacobian once for the whole subject, not once per label directory.
+    jacobian_img = nib.load(str(jacobian_path))
+    jacobian_data = jacobian_img.get_fdata()
+    print(f"Loaded Jacobian image once from {jacobian_path}", flush=True)
+    print(f"Worker threads: {num_workers}", flush=True)
+
+    vectors: list[np.ndarray] = []
     for label, parcel_paths in label_exports:
-        export_vectors(
-            parcel_paths=parcel_paths,
-            jacobian_path=jacobian_path,
-            output_dir=subject_dir / f"label_{label}",
-            num_workers=num_workers,
-            force=True,
-        )
+        vectors.extend(extract_vectors(parcel_paths, jacobian_img, jacobian_data, num_workers))
+        print(f"[label {label:>3}] extracted {len(parcel_paths):6d} parcel vectors", flush=True)
+
+    if not vectors:
+        raise ValueError(f"No parcels selected for {subject_id}")
+
+    # One concatenated float32 block plus an int64 index, rather than a file per parcel.
+    offsets = np.cumsum([0] + [vector.size for vector in vectors], dtype=np.int64)
+    atomic_write_raw(subject_dir / VECTOR_DATA_FILENAME, np.concatenate(vectors), VECTOR_DTYPE)
+    atomic_write_raw(subject_dir / VECTOR_OFFSETS_FILENAME, offsets, OFFSET_DTYPE)
 
     final_source_signature = file_signature(jacobian_path)
     if not signatures_match(source_signature, final_source_signature):
         raise RuntimeError(f"Jacobian changed during extraction: {jacobian_path}")
-    write_direct_summaries(subject_dir, parcel_ids)
+    write_direct_summaries(subject_dir, vectors, parcel_ids)
     write_completion(subject_dir, {
-        "schema_version": 1,
+        "schema_version": 2,
         "stage": "parcel_vectors",
         "subject_id": subject_id,
         "atlas_id": atlas.get("atlas_id"),
@@ -491,6 +508,10 @@ def export_subject(
         "direct_summary_dtype": "float64",
         "direct_mean_file": DIRECT_MEAN_FILENAME,
         "direct_median_file": DIRECT_MEDIAN_FILENAME,
+        "vector_data_file": VECTOR_DATA_FILENAME,
+        "vector_offsets_file": VECTOR_OFFSETS_FILENAME,
+        "vector_dtype": VECTOR_DTYPE,
+        "offset_dtype": OFFSET_DTYPE,
     })
     print(f"Validated parcel-vector stage complete: {subject_dir}", flush=True)
 

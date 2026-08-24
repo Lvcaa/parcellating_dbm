@@ -6,6 +6,13 @@ over a forward warp field that already exists (e.g. under
 data/warps/<subject-id>/Reg_/_SyN1Warp.nii.gz). Outputs are written under
 <output-root>/<subject-id>/.
 
+CreateJacobianDeterminantImage \
+    3 \
+    _SyN1Warp.nii.gz \
+    output_logJacobian.nii.gz \
+    1 \
+    0
+
 Usage:
     python scripts/registration/compute_log_jacobian.py --warp-image PATH --subject-id ID [options]
 

@@ -254,6 +254,8 @@ def _to_quantile_grid(v: np.ndarray) -> np.ndarray:
     L = len(v_sorted)
     if L == QUANTILE_LEN:
         return v_sorted
+
+    # Interpolate to the target quantile levels.
     src_q = (np.arange(L, dtype=np.float32) + 0.5) / L
     tgt_q = (np.arange(QUANTILE_LEN, dtype=np.float32) + 0.5) / QUANTILE_LEN
     return np.interp(tgt_q, src_q, v_sorted).astype(np.float32)
@@ -265,44 +267,41 @@ def load_subject_parcels(subject_folder: Path) -> tuple[list[str], np.ndarray, d
     for the Wasserstein method, and a dict of per-parcel summary arrays
     ("mean", "var", "median", "iqr") for the KL and median/IQR methods.
     """
-    label_dirs = sorted(
-        (p for p in subject_folder.iterdir() if p.is_dir() and p.name.startswith("label_")),
-        key=lambda path: int(path.name.removeprefix("label_")),
-    )
-    if not label_dirs:
-        raise ValueError(f"No label_* directories found under {subject_folder}")
+    order_path = subject_folder / "parcel_order.txt"
+    data_path = subject_folder / "parcel_vectors.dat"
+    offsets_path = subject_folder / "parcel_offsets.dat"
+    if not order_path.is_file() or not data_path.is_file() or not offsets_path.is_file():
+        raise ValueError(f"Missing parcel_order.txt or parcel vector .dat files under {subject_folder}")
 
-    parcel_ids: list[str] = []
+    parcel_ids = order_path.read_text(encoding="utf-8").splitlines()
+    offsets = np.fromfile(offsets_path, dtype=np.int64)
+    data = np.memmap(data_path, dtype=np.float32, mode="r")
+    if len(offsets) != len(parcel_ids) + 1 or offsets[0] != 0 or offsets[-1] != data.size:
+        raise ValueError(f"Parcel offsets do not match parcel order/data under {subject_folder}")
+    if np.any(offsets[1:] <= offsets[:-1]):
+        raise ValueError(f"Parcel offsets are not strictly increasing under {subject_folder}")
+
     rows: list[np.ndarray] = []
     means: list[float] = []
     variances: list[float] = []
     medians: list[float] = []
     iqrs: list[float] = []
 
-    # Loop over label directories and load all roi_*.npy files, computing quantiles and summary stats.
-    for label_dir in label_dirs:
-        for npy_path in sorted(
-            label_dir.glob("roi_*.npy"), key=lambda path: int(path.stem.removeprefix("roi_"))
-        ):
-            v = np.load(npy_path).reshape(-1)
-            if v.size == 0:
-                raise ValueError(f"Parcel vector is empty: {npy_path}")
-            if not np.isfinite(v).all():
-                raise ValueError(f"Parcel vector contains non-finite values: {npy_path}")
-            parcel_ids.append(f"{label_dir.name}/{npy_path.stem}")
+    # Each parcel is the slice data[offsets[i]:offsets[i + 1]].
+    for parcel_id, start, end in zip(parcel_ids, offsets[:-1], offsets[1:]):
+        v = data[start:end]
+        if not np.isfinite(v).all():
+            raise ValueError(f"Parcel vector contains non-finite values: {parcel_id}")
 
-            # Append quantile for Wasserstein method
-            rows.append(_to_quantile_grid(v))
-
-            # Append mean, variance, median, and IQR for KL and median/IQR methods
-            means.append(float(np.mean(v, dtype=np.float64)))
-            variances.append(max(float(np.var(v, dtype=np.float64)), MIN_VARIANCE))
-            q25, q75 = np.percentile(v, [25, 75])
-            medians.append(float(np.median(v)))
-            iqrs.append(max(float(q75 - q25), MIN_IQR))
+        rows.append(_to_quantile_grid(v))
+        means.append(float(np.mean(v, dtype=np.float64)))
+        variances.append(max(float(np.var(v, dtype=np.float64)), MIN_VARIANCE))
+        q25, q75 = np.percentile(v, [25, 75])
+        medians.append(float(np.median(v)))
+        iqrs.append(max(float(q75 - q25), MIN_IQR))
 
     if not rows:
-        raise ValueError(f"No parcel .npy files found under {subject_folder}")
+        raise ValueError(f"No parcel vectors found under {subject_folder}")
     if len(set(parcel_ids)) != len(parcel_ids):
         raise ValueError(f"Duplicate parcel IDs found under {subject_folder}")
 
@@ -354,14 +353,22 @@ def _compute_block(
 
     Returns (i_start, i_end, sim_block) where sim_block has shape (i_end-i_start, N).
     """
-    block = sorted_matrix[i_start:i_end]          # (B, L)
+    # Select a block of rows from the sorted quantile matrix to process
+    block = sorted_matrix[i_start:i_end]
+
+    # N is the total number of parcels and L is the number of quantiles (QUANTILE_LEN)
     N, L = sorted_matrix.shape
 
+    # Create distance matrix of shape (B, N) where B = i_end - i_start
     dist = np.zeros((len(block), N), dtype=np.float32)
+
+    # Iterate over each quantile
     for k in range(L):
+        # Compute the absolute difference between the k-th quantile of the block and all parcels
         dist += np.abs(block[:, k : k + 1] - sorted_matrix[:, k])   # (B, N)
     dist /= L
 
+    # Convert distances to similarities using the specified formula
     sim = _distance_block_to_similarity(dist, i_start, i_end, sim_formula)
     return i_start, i_end, sim
 
