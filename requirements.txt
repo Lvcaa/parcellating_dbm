@@ -1,6 +1,7 @@
 numpy
 scipy
 nibabel
+pymetis==2025.2.2
 joblib
 pandas
 statsmodels
@@ -8,3 +9,6 @@ scikit-learn
 networkx
 python-igraph
 leidenalg
+torch
+matplotlib
+seaborn
