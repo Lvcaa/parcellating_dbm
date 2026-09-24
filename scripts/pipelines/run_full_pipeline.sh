@@ -70,7 +70,6 @@ python scripts/validation/freeze_pipeline.py "$FREEZE_MODE" \
   --atlas-manifest "$ROIS_DIR/atlas_manifest.json" \
   --subject-list "$SUBJECTS_FILE" \
   --config sim_formula=both \
-  --config save_matrix=false \
   --config method="$METHODS"
 
 echo "--- [4/6] Per-subject: log-Jacobian -> parcel vectors -> graphs ---"

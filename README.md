@@ -45,14 +45,13 @@ python scripts/validation/compare_jacobian_modes.py \
 ```
 
 After reviewing that comparison, launch a versioned batch. Both similarity
-formulas are built when `--sim-formula` is omitted; dense matrices remain off:
+formulas are built when `--sim-formula` is omitted:
 
 ```bash
 bash scripts/run_batch_pipeline.sh data/test_cohort_warps_available.txt \
   --run-id corrected_bilateral_v1 \
   --rois-dir /path/to/corrected_rois \
   --jacobian-geometric false \
-  --save-matrix false \
   --num-workers 8
 ```
 
@@ -197,19 +196,20 @@ and `--n-parcels` for a smaller test run.
 [`scripts/graph_building/wasserstein_distance_graph2.py`](scripts/graph_building/wasserstein_distance_graph2.py)
 is the active optimized graph builder. It projects sorted parcel vectors onto a
 common quantile grid and computes pairwise Wasserstein similarities in blocks.
-Weighted degree is saved; the dense matrix is disabled unless explicitly
-requested with `--save-matrix true`.
+Only the normalized weighted-degree vector is retained.
 
 Choose the distance-to-similarity transform explicitly:
 
 ```bash
 python scripts/graph_building/wasserstein_distance_graph2.py \
   --subject-id sub-0091 \
+  --method was \
   --sim-formula 1 \
   --num-workers 8
 
 python scripts/graph_building/wasserstein_distance_graph2.py \
   --subject-id sub-0091 \
+  --method was \
   --sim-formula 2 \
   --num-workers 8
 ```
@@ -228,13 +228,9 @@ Each validated graph folder contains:
 ```text
 weighted_degree.dat     # Float64 weighted-degree vector
 metadata.json           # Formula, normalization, and atlas contract
-metadata.npy            # Number of parcels (compatibility)
 parcel_order.txt        # Row/column order for interpreting graph arrays
 complete.json           # Atomic stage-completion contract
 ```
-
-`adjacency_matrix.dat` is present only when `--save-matrix true` is explicitly
-requested.
 
 ### 6. Compare subjects
 

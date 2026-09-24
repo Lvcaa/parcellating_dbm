@@ -82,8 +82,6 @@ def main() -> None:
     configuration = run_manifest.get("configuration", {})
     if configuration.get("sim_formula") != "both":
         raise ValueError("Cohort validation requires both similarity formulas")
-    if configuration.get("save_matrix") != "false":
-        raise ValueError("Cohort validation requires save_matrix=false")
     if configuration.get("method") != args.methods:
         raise ValueError(f"Run manifest method {configuration.get('method')!r} does not match --methods {args.methods!r}")
     if is_definitive:
@@ -143,8 +141,6 @@ def main() -> None:
                 raise ValueError(f"Wrong method in {label}/{subject}")
             if completion.get("sim_formula") != expected_formula:
                 raise ValueError(f"Wrong similarity formula in {label}/{subject}")
-            if completion.get("adjacency_matrix_saved") is not False:
-                raise ValueError(f"Unexpected dense adjacency matrix contract: {label}/{subject}")
             if (root / subject / "adjacency_matrix.dat").exists():
                 raise ValueError(f"Dense adjacency matrix retained: {label}/{subject}")
             if (
@@ -169,7 +165,6 @@ def main() -> None:
         "parcel_count": parcel_count,
         "parcel_order_sha256": reference_order_hash,
         "atlas_id": reference_atlas_hash,
-        "dense_adjacency_required": False,
         "run_configuration": configuration,
     }
     report_path = args.report or args.run_root / "cohort_validation.json"

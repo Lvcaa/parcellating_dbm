@@ -1,53 +1,14 @@
-"""
-Build dense parcel-to-parcel similarity graphs for one subject.
+"""Build parcel-similarity weighted degrees for one subject.
 
-Three edge definitions are available via --method (comma-separated):
-    was   Wasserstein-1, approximated by mean absolute quantile difference
-          over a common 15-point quantile grid.
-    kl    Symmetrized Gaussian KL divergence between parcel (mean, variance)
-          summaries: 0.5 * (KL(P||Q) + KL(Q||P)).
-    meiq  Robust distance between parcel (median, IQR) summaries:
-          |median_i - median_j| / (0.5 * (IQR_i + IQR_j)).
-
-Every method's distance is converted to a similarity with the same
---sim-formula transform, and weighted degree is always computed and stored
-as a float64 memmap. The dense (N, N) adjacency matrix is only written to
-disk when --save-matrix true is passed — at scale (up to ~90k parcels) the
-full matrix is far larger than the degree vector, so it is skipped by
-default. Compute cost still grows quadratically with the parcel count either
-way, since every pairwise similarity is computed to derive weighted degree;
-only the disk-write cost is avoided.
-
-Usage:
-    python scripts/graph_building/wasserstein_distance_graph2.py (--input-folder PATH | --subject-id ID) --method was,kl,meiq --sim-formula {1,2} [options]
-
-Parameters:
-    --input-folder PATH      Direct subject parcel-vector folder.
-    --input-root PATH        Subject-folder root (default: outputs/jacobian_parcel_vectors).
-    --subject-id TEXT        Folder name under --input-root when --input-folder is omitted.
-    --output-folder PATH     Custom graph output folder. Only valid with a single --method.
-    --method LIST            Required. Comma-separated subset of {was, kl, meiq}.
-    --sim-formula {1,2}      Required transform: 1 = exp(-W), 2 = 1/(1+W).
-    --save-matrix {true,false}  Write the dense adjacency matrix to disk (default: false).
-    --num-workers INT        Worker processes (default: 8).
-    --block-size INT         Rows per worker job (default: 500).
-    --progress-every INT     Progress interval in completed blocks (default: 10).
-
-Outputs (per method, under its own output folder/<subject_id>/):
-    weighted_degree.dat, metadata.npy, metadata.json, parcel_order.txt, and
-    adjacency_matrix.dat only when --save-matrix true.
-
-Examples:
-    python scripts/graph_building/wasserstein_distance_graph2.py --subject-id sub-0091 --method was --sim-formula 1
-    python scripts/graph_building/wasserstein_distance_graph2.py --subject-id sub-0091 --method was,kl,meiq --sim-formula 2 --num-workers 4
-    python scripts/graph_building/wasserstein_distance_graph2.py --input-folder outputs/jacobian_parcel_vectors/sub-OAS30999 --method kl --sim-formula 1
+Supported distances are approximate Wasserstein-1 (``was``), symmetrized
+Gaussian KL (``kl``), and a robust median/IQR distance (``meiq``). Pairwise
+similarities are computed in row blocks; only normalized weighted-degree
+vectors are retained.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -57,7 +18,6 @@ from joblib import Parallel, delayed
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pipeline_integrity import (
-    atomic_save_npy,
     atomic_write_json,
     atomic_write_raw,
     atomic_write_text,
@@ -114,8 +74,8 @@ MIN_IQR = 1e-6
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Load parcel vectors once, then build one or more dense similarity "
-            "graphs (Wasserstein / KL / median-IQR) from them."
+            "Build one or more parcel-similarity weighted-degree vectors "
+            "(Wasserstein / KL / median-IQR)."
         )
     )
     parser.add_argument(
@@ -130,7 +90,10 @@ def parse_args() -> argparse.Namespace:
         "--input-root",
         type=Path,
         default=DEFAULT_INPUT_ROOT,
-        help=f"Root directory containing subject parcel-vector folders (default: {DEFAULT_INPUT_ROOT}).",
+        help=(
+            "Root directory containing subject parcel-vector folders "
+            f"(default: {DEFAULT_INPUT_ROOT})."
+        ),
     )
     parser.add_argument(
         "--subject-id",
@@ -169,18 +132,6 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--save-matrix",
-        dest="save_matrix",
-        type=str.lower,
-        choices=("true", "false"),
-        default="false",
-        help=(
-            "Write the dense (N, N) adjacency matrix to disk (default: false). "
-            "The matrix is large at scale; weighted degree is always computed "
-            "and saved regardless of this flag."
-        ),
-    )
-    parser.add_argument(
         "--num-workers",
         type=int,
         default=8,
@@ -196,17 +147,8 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--progress-every",
-        type=int,
-        default=10,
-        help="Print a progress update every N completed blocks (default: 10).",
+        "--force", action="store_true", help="Recompute a matching completed graph."
     )
-    parser.add_argument(
-        "--allow-unvalidated-input",
-        action="store_true",
-        help="Allow parcel folders without complete.json (diagnostic use only).",
-    )
-    parser.add_argument("--force", action="store_true", help="Recompute a matching completed graph.")
     return parser.parse_args()
 
 
@@ -217,7 +159,9 @@ def parse_methods(raw: str) -> list[str]:
         if not token:
             continue
         if token not in METHOD_CHOICES:
-            raise ValueError(f"Unsupported --method value: {token!r}; choose from {METHOD_CHOICES}")
+            raise ValueError(
+                f"Unsupported --method value: {token!r}; choose from {METHOD_CHOICES}"
+            )
         if token not in methods:
             methods.append(token)
     if not methods:
@@ -251,17 +195,18 @@ def default_output_root(method: str, sim_formula: int, subject_id: str) -> Path:
 def _to_quantile_grid(v: np.ndarray) -> np.ndarray:
     """Sort v and interpolate to QUANTILE_LEN evenly-spaced quantile levels."""
     v_sorted = np.sort(v.astype(np.float32))
-    L = len(v_sorted)
-    if L == QUANTILE_LEN:
+    sample_count = len(v_sorted)
+    if sample_count == QUANTILE_LEN:
         return v_sorted
 
-    # Interpolate to the target quantile levels.
-    src_q = (np.arange(L, dtype=np.float32) + 0.5) / L
+    src_q = (np.arange(sample_count, dtype=np.float32) + 0.5) / sample_count
     tgt_q = (np.arange(QUANTILE_LEN, dtype=np.float32) + 0.5) / QUANTILE_LEN
     return np.interp(tgt_q, src_q, v_sorted).astype(np.float32)
 
 
-def load_subject_parcels(subject_folder: Path) -> tuple[list[str], np.ndarray, dict[str, np.ndarray]]:
+def load_subject_parcels(
+    subject_folder: Path,
+) -> tuple[list[str], np.ndarray, dict[str, np.ndarray]]:
     """
     Return parcel IDs, a float32 sorted quantile matrix of shape (N, QUANTILE_LEN)
     for the Wasserstein method, and a dict of per-parcel summary arrays
@@ -271,7 +216,9 @@ def load_subject_parcels(subject_folder: Path) -> tuple[list[str], np.ndarray, d
     data_path = subject_folder / "parcel_vectors.dat"
     offsets_path = subject_folder / "parcel_offsets.dat"
     if not order_path.is_file() or not data_path.is_file() or not offsets_path.is_file():
-        raise ValueError(f"Missing parcel_order.txt or parcel vector .dat files under {subject_folder}")
+        raise ValueError(
+            f"Missing parcel_order.txt or parcel vector .dat files under {subject_folder}"
+        )
 
     parcel_ids = order_path.read_text(encoding="utf-8").splitlines()
     offsets = np.fromfile(offsets_path, dtype=np.int64)
@@ -287,7 +234,6 @@ def load_subject_parcels(subject_folder: Path) -> tuple[list[str], np.ndarray, d
     medians: list[float] = []
     iqrs: list[float] = []
 
-    # Each parcel is the slice data[offsets[i]:offsets[i + 1]].
     for parcel_id, start, end in zip(parcel_ids, offsets[:-1], offsets[1:]):
         v = data[start:end]
         if not np.isfinite(v).all():
@@ -305,7 +251,6 @@ def load_subject_parcels(subject_folder: Path) -> tuple[list[str], np.ndarray, d
     if len(set(parcel_ids)) != len(parcel_ids):
         raise ValueError(f"Duplicate parcel IDs found under {subject_folder}")
 
-    # Stack the quantile rows into a single (N, QUANTILE_LEN) array for Wasserstein method
     stats = {
         "mean": np.asarray(means, dtype=np.float64),
         "var": np.asarray(variances, dtype=np.float64),
@@ -353,22 +298,13 @@ def _compute_block(
 
     Returns (i_start, i_end, sim_block) where sim_block has shape (i_end-i_start, N).
     """
-    # Select a block of rows from the sorted quantile matrix to process
     block = sorted_matrix[i_start:i_end]
+    n_parcels, n_quantiles = sorted_matrix.shape
+    dist = np.zeros((len(block), n_parcels), dtype=np.float32)
+    for k in range(n_quantiles):
+        dist += np.abs(block[:, k : k + 1] - sorted_matrix[:, k])
+    dist /= n_quantiles
 
-    # N is the total number of parcels and L is the number of quantiles (QUANTILE_LEN)
-    N, L = sorted_matrix.shape
-
-    # Create distance matrix of shape (B, N) where B = i_end - i_start
-    dist = np.zeros((len(block), N), dtype=np.float32)
-
-    # Iterate over each quantile
-    for k in range(L):
-        # Compute the absolute difference between the k-th quantile of the block and all parcels
-        dist += np.abs(block[:, k : k + 1] - sorted_matrix[:, k])   # (B, N)
-    dist /= L
-
-    # Convert distances to similarities using the specified formula
     sim = _distance_block_to_similarity(dist, i_start, i_end, sim_formula)
     return i_start, i_end, sim
 
@@ -420,200 +356,136 @@ def _compute_block_median_iqr(
     return i_start, i_end, sim
 
 
-def save_parcel_order(parcel_ids: list[str], output_path: Path) -> None:
-    atomic_write_text(output_path, "\n".join(parcel_ids) + "\n")
-
-
-def save_metadata(
-    output_path: Path,
-    subject_id: str,
-    n_parcels: int,
-    method: str,
-    sim_formula: int,
-    save_matrix: bool,
-    input_completion: dict,
-    parcel_order_hash: str,
-) -> None:
-    metadata = {
-        "subject_id": subject_id,
-        "method": method,
-        "n_parcels": n_parcels,
-        "node_feature": METHOD_NODE_FEATURE_LABELS[method],
-        "jacobian_type": "log-Jacobian determinant",
-        "quantile_count": QUANTILE_LEN if method == METHOD_WASSERSTEIN else None,
-        "distance": METHOD_LABELS[method],
-        "similarity_formula": SIM_FORMULA_LABELS[sim_formula],
-        "adjacency_matrix_saved": save_matrix,
-        "adjacency_dtype": "float32",
-        "weighted_degree_dtype": "float64",
-        "weighted_degree_normalization": "sum of off-diagonal similarities divided by N-1",
-        "self_loops_in_adjacency": True,
-        "self_loops_in_weighted_degree": False,
-        "atlas_id": input_completion.get("atlas_id"),
-        "atlas_manifest_sha256": input_completion.get("atlas_manifest_sha256"),
-        "parcel_order_sha256": parcel_order_hash,
-    }
-    atomic_write_json(output_path, metadata)
-
-
-def read_input_contract(subject_folder: Path, allow_unvalidated: bool) -> tuple[dict, list[str]]:
+def read_input_contract(subject_folder: Path, parcel_ids: list[str]) -> dict:
     completion = load_completion(subject_folder)
-    order_path = subject_folder / "parcel_order.txt"
     if completion is None:
-        if not allow_unvalidated:
-            raise ValueError(
-                f"Validated parcel completion marker missing: {subject_folder / 'complete.json'}"
-            )
-        return {"stage": "UNVALIDATED", "atlas_id": "UNVALIDATED"}, []
+        raise ValueError(
+            f"Validated parcel completion marker missing: {subject_folder / 'complete.json'}"
+        )
     if completion.get("stage") != "parcel_vectors":
         raise ValueError(f"Unexpected input completion stage in {subject_folder}")
-    if not order_path.is_file():
-        raise ValueError(f"Parcel order missing: {order_path}")
-    parcel_ids = order_path.read_text(encoding="utf-8").splitlines()
     if len(parcel_ids) != completion.get("parcel_count"):
         raise ValueError(f"Parcel-order count differs from completion manifest: {subject_folder}")
     if sha256_lines(parcel_ids) != completion.get("parcel_order_sha256"):
         raise ValueError(f"Parcel-order hash differs from completion manifest: {subject_folder}")
-    return completion, parcel_ids
+    return completion
 
 
-def graph_is_complete(
-    out_dir: Path,
-    *,
+def graph_contract(
     subject_id: str,
     n_parcels: int,
     parcel_order_hash: str,
     input_completion: dict,
     method: str,
     sim_formula: int,
-    save_matrix: bool,
-) -> bool:
-    completion = load_completion(out_dir)
-    if completion is None or completion.get("stage") != "wasserstein_graph":
-        return False
-    expected = {
+) -> dict:
+    return {
+        "schema_version": 1,
+        "stage": "wasserstein_graph",
         "subject_id": subject_id,
         "parcel_count": n_parcels,
         "parcel_order_sha256": parcel_order_hash,
+        "atlas_id": input_completion.get("atlas_id"),
         "atlas_manifest_sha256": input_completion.get("atlas_manifest_sha256"),
         "method": method,
         "sim_formula": sim_formula,
-        "adjacency_matrix_saved": save_matrix,
+        "similarity_formula": SIM_FORMULA_LABELS[sim_formula],
+        "weighted_degree_dtype": "float64",
     }
-    if any(completion.get(key) != value for key, value in expected.items()):
+
+
+def graph_is_complete(out_dir: Path, contract: dict) -> bool:
+    completion = load_completion(out_dir)
+    if completion is None or any(
+        completion.get(key) != value for key, value in contract.items()
+    ):
         return False
     try:
-        validate_raw_vector(out_dir / "weighted_degree.dat", length=n_parcels)
+        validate_raw_vector(
+            out_dir / "weighted_degree.dat", length=contract["parcel_count"]
+        )
     except ValueError:
         return False
-    if save_matrix:
-        matrix = out_dir / "adjacency_matrix.dat"
-        if not matrix.is_file() or matrix.stat().st_size != n_parcels * n_parcels * 4:
-            return False
-    return True
+    return not (out_dir / "adjacency_matrix.dat").exists()
 
 
-_METHOD_BLOCK_FN = {
-    METHOD_WASSERSTEIN: _compute_block,
-    METHOD_KL: _compute_block_kl,
-    METHOD_MEDIAN_IQR: _compute_block_median_iqr,
-}
-
-
-def _block_args(method: str, i_start: int, i_end: int, sorted_matrix: np.ndarray, stats: dict, sim_formula: int) -> tuple:
+def save_metadata(output_path: Path, contract: dict) -> None:
+    method = contract["method"]
+    metadata = {
+        "subject_id": contract["subject_id"],
+        "method": method,
+        "n_parcels": contract["parcel_count"],
+        "node_feature": METHOD_NODE_FEATURE_LABELS[method],
+        "jacobian_type": "log-Jacobian determinant",
+        "distance": METHOD_LABELS[method],
+        "similarity_formula": contract["similarity_formula"],
+        "weighted_degree_dtype": "float64",
+        "weighted_degree_normalization": (
+            "sum of off-diagonal similarities divided by N-1"
+        ),
+        "self_loops_in_weighted_degree": False,
+        "atlas_id": contract["atlas_id"],
+        "atlas_manifest_sha256": contract["atlas_manifest_sha256"],
+        "parcel_order_sha256": contract["parcel_order_sha256"],
+    }
     if method == METHOD_WASSERSTEIN:
-        return (i_start, i_end, sorted_matrix, sim_formula)
-    if method == METHOD_KL:
-        return (i_start, i_end, stats["mean"], stats["var"], sim_formula)
-    if method == METHOD_MEDIAN_IQR:
-        return (i_start, i_end, stats["median"], stats["iqr"], sim_formula)
-    raise ValueError(f"Unsupported method: {method}")
+        metadata["quantile_count"] = QUANTILE_LEN
+    atomic_write_json(output_path, metadata)
 
 
 def build_one_graph(
     *,
     method: str,
     args: argparse.Namespace,
-    subject_id: str,
     parcel_ids: list[str],
     sorted_matrix: np.ndarray,
     stats: dict,
     blocks: list[tuple[int, int]],
     out_dir: Path,
-    input_completion: dict,
-    parcel_order_hash: str,
-    save_matrix: bool,
+    contract: dict,
 ) -> None:
-    N = len(parcel_ids)
-    num_blocks = len(blocks)
-    block_fn = delayed(_METHOD_BLOCK_FN[method])
+    n_parcels = len(parcel_ids)
+    if method == METHOD_WASSERSTEIN:
+        block_fn, method_args = _compute_block, (sorted_matrix,)
+    elif method == METHOD_KL:
+        block_fn, method_args = _compute_block_kl, (stats["mean"], stats["var"])
+    else:
+        block_fn = _compute_block_median_iqr
+        method_args = (stats["median"], stats["iqr"])
 
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    mm_matrix = None
-    temporary_matrix_path = out_dir / f".adjacency_matrix.{os.getpid()}.tmp"
-    if save_matrix:
-        mm_matrix = np.memmap(temporary_matrix_path, dtype="float32", mode="w+", shape=(N, N))
-        mm_matrix[:] = 0.0
-        np.fill_diagonal(mm_matrix, 1.0)
-
-    weighted_degree = np.zeros(N, dtype=np.float64)
+    weighted_degree = np.zeros(n_parcels, dtype=np.float64)
     start_time = time.time()
-
     results = Parallel(n_jobs=args.num_workers, prefer="processes", return_as="generator")(
-        block_fn(*_block_args(method, i_start, i_end, sorted_matrix, stats, args.sim_formula))
+        delayed(block_fn)(i_start, i_end, *method_args, args.sim_formula)
         for i_start, i_end in blocks
     )
 
-    for completed, (i_start, i_end, sim_block) in enumerate(results, start=1):
-        if mm_matrix is not None:
-            mm_matrix[i_start:i_end, :] = sim_block
-            mm_matrix[:, i_start:i_end] = sim_block.T
-        block_degree = (sim_block.sum(axis=1, dtype=np.float64) - 1.0) / (N - 1)
-        if not np.isfinite(block_degree).all():
-            raise ValueError(f"[{method}] Non-finite weighted degree in row block [{i_start}, {i_end})")
-        weighted_degree[i_start:i_end] = block_degree
+    for completed, (i_start, i_end, similarities) in enumerate(results, start=1):
+        degree = (
+            similarities.sum(axis=1, dtype=np.float64) - 1.0
+        ) / (n_parcels - 1)
+        if not np.isfinite(degree).all():
+            raise ValueError(
+                f"[{method}] Non-finite weighted degree in row block "
+                f"[{i_start}, {i_end})"
+            )
+        weighted_degree[i_start:i_end] = degree
 
-        if completed % args.progress_every == 0 or completed == num_blocks:
+        if completed % 10 == 0 or completed == len(blocks):
             elapsed = time.time() - start_time
-            pct = completed / num_blocks * 100
-            print(f"[{method}] [progress] {completed}/{num_blocks} blocks ({pct:.1f}%) — {elapsed:.1f}s", flush=True)
-
-    if mm_matrix is not None:
-        mm_matrix.flush()
-        del mm_matrix
-        os.replace(temporary_matrix_path, out_dir / "adjacency_matrix.dat")
+            percentage = completed / len(blocks) * 100
+            print(
+                f"[{method}] [progress] {completed}/{len(blocks)} blocks "
+                f"({percentage:.1f}%) — {elapsed:.1f}s",
+                flush=True,
+            )
 
     atomic_write_raw(out_dir / "weighted_degree.dat", weighted_degree, "float64")
-    atomic_save_npy(out_dir / "metadata.npy", np.array([N], dtype=np.int64))
-    save_metadata(
-        out_dir / "metadata.json",
-        subject_id,
-        N,
-        method,
-        args.sim_formula,
-        save_matrix,
-        input_completion,
-        parcel_order_hash,
-    )
-    save_parcel_order(parcel_ids, out_dir / "parcel_order.txt")
-    write_completion(out_dir, {
-        "schema_version": 1,
-        "stage": "wasserstein_graph",
-        "subject_id": subject_id,
-        "parcel_count": N,
-        "parcel_order_sha256": parcel_order_hash,
-        "atlas_id": input_completion.get("atlas_id"),
-        "atlas_manifest_sha256": input_completion.get("atlas_manifest_sha256"),
-        "method": method,
-        "sim_formula": args.sim_formula,
-        "similarity_formula": SIM_FORMULA_LABELS[args.sim_formula],
-        "adjacency_matrix_saved": save_matrix,
-        "weighted_degree_dtype": "float64",
-    })
-
-    elapsed = time.time() - start_time
-    print(f"[{method}] Done in {elapsed:.1f}s  →  {out_dir}", flush=True)
+    save_metadata(out_dir / "metadata.json", contract)
+    atomic_write_text(out_dir / "parcel_order.txt", "\n".join(parcel_ids) + "\n")
+    write_completion(out_dir, contract)
+    print(f"[{method}] Done in {time.time() - start_time:.1f}s  →  {out_dir}", flush=True)
 
 
 def main() -> None:
@@ -622,74 +494,62 @@ def main() -> None:
         raise ValueError("--num-workers must be at least 1")
     if args.block_size < 1:
         raise ValueError("--block-size must be at least 1")
-    save_matrix = args.save_matrix == "true"
+
     methods = parse_methods(args.method)
     if args.output_folder is not None and len(methods) != 1:
-        raise ValueError("--output-folder is only valid when --method names exactly one method")
+        raise ValueError("--output-folder is only valid with exactly one method")
 
     subject_folder, subject_id = resolve_subject_folder(
-        input_folder=args.input_folder,
-        input_root=args.input_root,
-        subject_id=args.subject_id,
+        args.input_folder, args.input_root, args.subject_id
     )
-
     print(f"Subject:      {subject_id}", flush=True)
     print(f"Input folder: {subject_folder}", flush=True)
-    print(f"Methods: {', '.join(methods)}", flush=True)
-    print(f"Save dense adjacency matrix: {save_matrix}", flush=True)
-    print(f"Similarity formula: {args.sim_formula} ({SIM_FORMULA_LABELS[args.sim_formula]})", flush=True)
-
-    input_completion, expected_parcel_ids = read_input_contract(
-        subject_folder, args.allow_unvalidated_input
-    )
-
-    parcel_ids, sorted_matrix, stats = load_subject_parcels(subject_folder)
-    N = len(parcel_ids)
-    if N < 2:
-        raise ValueError("At least two parcels are required to build a graph")
-    parcel_order_hash = sha256_lines(parcel_ids)
-    if expected_parcel_ids and parcel_ids != expected_parcel_ids:
-        raise ValueError("Loaded parcel files differ from the validated input parcel order")
-    print(f"Loaded {N} parcels", flush=True)
-
-    blocks = [(i, min(i + args.block_size, N)) for i in range(0, N, args.block_size)]
+    print(f"Methods:      {', '.join(methods)}", flush=True)
     print(
-        f"Computing similarities: {len(blocks)} blocks of ≤{args.block_size} rows, "
-        f"{args.num_workers} workers, {len(methods)} method(s)",
+        f"Similarity:   {SIM_FORMULA_LABELS[args.sim_formula]}",
         flush=True,
     )
 
-    # Loop over all the methods the user requested, building each graph in turn. The parcel vectors are loaded once and reused.
-    for method in methods:
-        out_dir = args.output_folder if args.output_folder is not None else default_output_root(method, args.sim_formula, subject_id)
+    parcel_ids, sorted_matrix, stats = load_subject_parcels(subject_folder)
+    input_completion = read_input_contract(subject_folder, parcel_ids)
+    n_parcels = len(parcel_ids)
+    if n_parcels < 2:
+        raise ValueError("At least two parcels are required to build a graph")
+    parcel_order_hash = sha256_lines(parcel_ids)
+    blocks = [
+        (start, min(start + args.block_size, n_parcels))
+        for start in range(0, n_parcels, args.block_size)
+    ]
+    print(
+        f"Loaded {n_parcels} parcels; computing {len(blocks)} blocks with "
+        f"{args.num_workers} workers",
+        flush=True,
+    )
 
-        # Check if the graph is already complete and valid; skip if so, unless --force is used.
-        if not args.force and expected_parcel_ids and graph_is_complete(
-            out_dir,
-            subject_id=subject_id,
-            n_parcels=N,
-            parcel_order_hash=parcel_order_hash,
-            input_completion=input_completion,
-            method=method,
-            sim_formula=args.sim_formula,
-            save_matrix=save_matrix,
-        ):
-            print(f"[{method}] Validated graph output already complete: {out_dir}", flush=True)
+    for method in methods:
+        out_dir = args.output_folder or default_output_root(
+            method, args.sim_formula, subject_id
+        )
+        contract = graph_contract(
+            subject_id,
+            n_parcels,
+            parcel_order_hash,
+            input_completion,
+            method,
+            args.sim_formula,
+        )
+        if not args.force and graph_is_complete(out_dir, contract):
+            print(f"[{method}] Output already complete: {out_dir}", flush=True)
             continue
-        
-        # Build the graph for this method, writing outputs to its designated folder.
         build_one_graph(
             method=method,
             args=args,
-            subject_id=subject_id,
             parcel_ids=parcel_ids,
             sorted_matrix=sorted_matrix,
             stats=stats,
             blocks=blocks,
             out_dir=out_dir,
-            input_completion=input_completion,
-            parcel_order_hash=parcel_order_hash,
-            save_matrix=save_matrix,
+            contract=contract,
         )
 
 

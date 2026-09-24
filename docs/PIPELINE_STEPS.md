@@ -53,8 +53,8 @@ The whole sequence below is implemented end to end in
    `scripts/graph_building/wasserstein_distance_graph2.py --method was,kl,meiq`
    One script, three edge definitions, selected via `--method` (comma-separated
    subset of `was`/`kl`/`meiq`). All three share the same `--sim-formula`
-   distance→similarity transform and the same dense-only, `--save-matrix`
-   default-false contract. `was` keeps its legacy output folder
+   distance→similarity transform and retain only normalized weighted degree.
+   `was` keeps its legacy output folder
    (`outputs/wasserstein_graphs_*`); `kl` and `meiq` write to
    `outputs/kl_graphs_*` and `outputs/median_iqr_graphs_*`.
 
