@@ -6,19 +6,23 @@ Each approximately equal-sized parcel is written as a NIfTI mask under
 Labels are processed sequentially; NIfTI writing within each label is parallel.
 
 Usage:
-    python scripts/parcellation/separate_cases/second_roi_test.py [options]
+    python scripts/parcellation/separate_cases/second_parcellation_method.py [options]
 
 Parameters:
     --roi-label INT          Optional label; repeatable (default: all retained labels).
+    --exclude-label INT      Label to omit; repeatable (default: none).
     --parcel-size INT        Target voxels per parcel (default: 15).
+    --target-parcels INT     Exact total across selected labels; replaces --parcel-size.
     --segmentation PATH      Input segmentation image.
     --output-root PATH       Root (default: outputs/test_parcellation/rois).
     --workers INT            Parallel writers (default: 75% of detected CPUs).
     --skip-neighbor-check    Skip connectivity diagnostics.
 
 Examples:
-    python scripts/parcellation/separate_cases/second_roi_test.py
-    python scripts/parcellation/separate_cases/second_roi_test.py --roi-label 24 --validate-only
+    python scripts/parcellation/separate_cases/second_parcellation_method.py
+    python scripts/parcellation/separate_cases/second_parcellation_method.py \
+        --exclude-label 24 --target-parcels 1000 \
+        --output-root outputs/atlases/atlas-1000-nocsf-from-voxels/rois
 """
 
 import argparse
@@ -72,10 +76,24 @@ def parse_args():
         ),
     )
     parser.add_argument(
+        "--exclude-label",
+        type=int,
+        action="append",
+        default=None,
+        help="Retained segmentation label to omit. Repeat to omit several labels.",
+    )
+    count_options = parser.add_mutually_exclusive_group()
+    count_options.add_argument(
         "--parcel-size",
         type=int,
         default=15,
-        help="Target number of voxels per sub-parcel.",
+        help="Target number of voxels per sub-parcel (default: 15).",
+    )
+    count_options.add_argument(
+        "--target-parcels",
+        type=int,
+        default=None,
+        help="Exact total parcel count across all selected labels.",
     )
     parser.add_argument(
         "--segmentation",
@@ -231,6 +249,52 @@ def allocate_parcels_to_components(component_sizes, parcel_size):
     return allocation
 
 
+def allocate_exact_parcels(seg_image, labels, target_parcels):
+    """Plan an exact global budget while reserving one parcel per 6-connected piece."""
+    components = []
+    structure = six_connectivity_structure()
+    for label in labels:
+        roi_mask = seg_image == label
+        if not np.any(roi_mask):
+            raise ValueError(f"ROI label {label} is absent from the segmentation")
+        component_map, n_components = ndimage.label(roi_mask, structure=structure)
+        component_sizes = np.bincount(component_map[roi_mask], minlength=n_components + 1)[1:]
+        components.extend((label, int(size)) for size in component_sizes)
+
+    minimum = len(components)
+    maximum = sum(size for _, size in components)
+    if target_parcels < minimum:
+        raise ValueError(
+            f"--target-parcels {target_parcels} is infeasible: "
+            f"the selected labels contain {minimum} disconnected pieces, "
+            "each requiring its own connected parcel"
+        )
+    if target_parcels > maximum:
+        raise ValueError(
+            f"--target-parcels {target_parcels} is infeasible: "
+            f"the selected labels contain only {maximum} voxels"
+        )
+
+    allocation = np.ones(minimum, dtype=np.int32)
+    queue = [(-size, index) for index, (_, size) in enumerate(components) if size > 1]
+    heapq.heapify(queue)
+    for _ in range(target_parcels - minimum):
+        if not queue:
+            raise RuntimeError("No connected component remains splittable")
+        _, index = heapq.heappop(queue)
+        allocation[index] += 1
+        component_size = components[index][1]
+        if allocation[index] < component_size:
+            heapq.heappush(
+                queue, (-component_size / int(allocation[index]), index)
+            )
+
+    allocations_by_label = {}
+    for index, (label, _) in enumerate(components):
+        allocations_by_label.setdefault(label, []).append(int(allocation[index]))
+    return allocations_by_label, minimum
+
+
 def choose_seed_indices(coords, n_seeds):
     """Select n_seeds voxel indices using a maximin spread: each seed maximises its distance from all prior seeds."""
     if n_seeds == 1:
@@ -273,6 +337,7 @@ def grow_connected_parcels(adjacency, targets, seeds):
     parcel_sizes = np.zeros(n_parcels, dtype=np.int32)
     frontiers = [deque() for _ in range(n_parcels)]
 
+    #
     for parcel_id, seed_index in enumerate(seeds):
         owners[seed_index] = parcel_id
         parcel_sizes[parcel_id] = 1
@@ -974,7 +1039,7 @@ def check_neigh(roi_coords_in_voxel):
         )
 
 
-def parcellate_label(args, label, template_img, seg_image):
+def parcellate_label(args, label, template_img, seg_image, component_allocation=None):
     """Build, validate, and optionally write one anatomical label."""
     roi_mask = seg_image == label
 
@@ -987,12 +1052,22 @@ def parcellate_label(args, label, template_img, seg_image):
     roi_coords = np.argwhere(roi_mask)
     roi_component_ids = component_map[roi_mask]
     component_ids, component_sizes = np.unique(roi_component_ids, return_counts=True)
-    component_allocation = allocate_parcels_to_components(component_sizes, args.parcel_size)
+    if component_allocation is None:
+        component_allocation = allocate_parcels_to_components(component_sizes, args.parcel_size)
+    else:
+        component_allocation = np.asarray(component_allocation, dtype=np.int32)
+        if (component_allocation.shape != component_sizes.shape
+                or np.any(component_allocation < 1)
+                or np.any(component_allocation > component_sizes)):
+            raise ValueError(f"Invalid parcel allocation for label {label}")
 
     print(f"Connected components: {n_components}")
     print(f"Largest component size: {int(component_sizes.max())}")
     print(f"Total ROI voxels: {int(len(roi_coords))}")
-    print(f"Target parcel size: {args.parcel_size}")
+    if args.target_parcels is None:
+        print(f"Target parcel size: {args.parcel_size}")
+    else:
+        print(f"Approximate voxels per parcel: {len(roi_coords) / component_allocation.sum():.1f}")
     print(f"Total output parcels: {int(component_allocation.sum())}")
 
     all_parcels = []
@@ -1068,7 +1143,8 @@ def parcellate_label(args, label, template_img, seg_image):
         "source_segmentation": file_signature(args.segmentation, include_sha256=True),
         "source_voxel_count": int(len(roi_coords)),
         "parcel_count": len(parcel_records),
-        "parcel_size_target": int(args.parcel_size),
+        "parcel_size_target": int(args.parcel_size) if args.target_parcels is None else None,
+        "parcel_count_target": int(component_allocation.sum()),
         "parcel_size_min": int(parcel_sizes.min()),
         "parcel_size_max": int(parcel_sizes.max()),
         "parcel_sizes_match_targets": bool(parcel_sizes_match_targets),
@@ -1093,6 +1169,8 @@ def main():
     args = parse_args()
     if args.parcel_size < 1:
         raise ValueError("--parcel-size must be at least 1")
+    if args.target_parcels is not None and args.target_parcels < 1:
+        raise ValueError("--target-parcels must be at least 1")
     if args.workers < 1:
         raise ValueError("--workers must be at least 1")
 
@@ -1103,47 +1181,85 @@ def main():
             f"use the isolated default {DEFAULT_OUTPUT_ROOT}"
         )
 
-    labels = list(args.roi_label) if args.roi_label else list(KEEP_LABELS)
-    if len(labels) != len(set(labels)):
-        raise ValueError(f"Duplicate --roi-label values: {labels}")
-    unknown_labels = sorted(set(labels) - set(KEEP_LABELS))
+    requested_labels = list(args.roi_label) if args.roi_label else list(KEEP_LABELS)
+    if len(requested_labels) != len(set(requested_labels)):
+        raise ValueError(f"Duplicate --roi-label values: {requested_labels}")
+    unknown_labels = sorted(set(requested_labels) - set(KEEP_LABELS))
     if unknown_labels:
         raise ValueError(f"Labels are not retained atlas labels: {unknown_labels}")
+    excluded_labels = sorted(set(args.exclude_label or []))
+    unknown_exclusions = sorted(set(excluded_labels) - set(KEEP_LABELS))
+    if unknown_exclusions:
+        raise ValueError(f"Cannot exclude labels outside the retained atlas: {unknown_exclusions}")
+    labels = [label for label in requested_labels if label not in excluded_labels]
+    if not labels:
+        raise ValueError("No labels remain after --exclude-label filtering")
+
+    if not args.validate_only and args.output_root.exists() and any(args.output_root.iterdir()):
+        raise FileExistsError(
+            f"Output root is not empty; choose a new atlas directory: {args.output_root}"
+        )
+
+    template_img, seg_image = load_segmentation(args.segmentation)
+    allocations_by_label = None
+    if args.target_parcels is not None:
+        allocations_by_label, minimum = allocate_exact_parcels(
+            seg_image, labels, args.target_parcels
+        )
+        print(f"Minimum connected parcels for selected labels: {minimum}")
+        print(f"Exact atlas parcel target: {args.target_parcels}")
+        for label in labels:
+            print(f"  Label {label} ({LABEL_DICT[label]}): "
+                  f"{sum(allocations_by_label[label])} parcels")
 
     detected_cpus = os.cpu_count() or 1
     print(f"Detected CPUs: {detected_cpus}")
     print(f"Writer workers: {args.workers} ({args.workers / detected_cpus:.0%} of CPUs)")
     print(f"Output root: {args.output_root.resolve()}")
     print(f"Labels processed sequentially: {labels}")
+    if excluded_labels:
+        print(f"Excluded labels: {excluded_labels}")
     if args.validate_only:
         print("Validation-only mode: no output files will be written")
     else:
         args.output_root.mkdir(parents=True, exist_ok=True)
 
-    template_img, seg_image = load_segmentation(args.segmentation)
     summaries = []
     for index, label in enumerate(labels, start=1):
         print(
             f"\n[{index}/{len(labels)}] Label {label}: {LABEL_DICT[label]}",
             flush=True,
         )
-        summaries.append(parcellate_label(args, label, template_img, seg_image))
+        allocation = None if allocations_by_label is None else allocations_by_label[label]
+        summaries.append(parcellate_label(
+            args, label, template_img, seg_image, component_allocation=allocation
+        ))
 
-    if not args.validate_only and labels == list(KEEP_LABELS):
+    total_parcels = sum(summary["parcel_count"] for summary in summaries)
+    if args.target_parcels is not None and total_parcels != args.target_parcels:
+        raise RuntimeError(
+            f"Built {total_parcels} parcels instead of {args.target_parcels}"
+        )
+    if not args.validate_only:
         manifest_path = args.output_root / "atlas_manifest.json"
         atomic_write_json(manifest_path, {
             "schema_version": 2,
             "validation_status": "passed",
             "algorithm": "adjacency_constrained_weighted_coarsening",
             "labels_processed_sequentially": True,
+            "selected_labels": labels,
+            "excluded_labels": excluded_labels,
             "writer_workers": int(args.workers),
             "source_segmentation": file_signature(args.segmentation, include_sha256=True),
-            "parcel_size_target": int(args.parcel_size),
+            "parcel_size_target": int(args.parcel_size) if args.target_parcels is None else None,
+            "target_parcels": args.target_parcels,
+            "parcel_count": total_parcels,
+            "source_voxel_count": sum(summary["source_voxel_count"] for summary in summaries),
             "labels": summaries,
         })
         print(f"Atlas manifest: {manifest_path}")
 
-    print("All requested labels validated successfully.")
+    print(f"All requested labels validated successfully: {total_parcels} parcels.")
 
 
 if __name__ == "__main__":

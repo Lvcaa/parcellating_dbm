@@ -90,15 +90,22 @@ def compute_thresholded_degree(upper_rows, threshold, n_parcels, build_graph=Fal
     if build_graph:
         rows, cols, weights = [], [], []
 
+    # Loop over each row of the upper triangle of the similarity matrix
     for i, upper_values in enumerate(upper_rows):
+
+        # Keep only the values above the threshold
         keep = upper_values >= threshold
+
+        # Indices of the kept values in the upper triangle
         js = np.flatnonzero(keep) + i + 1
         kept_values = upper_values[keep].astype(np.float32, copy=False)
 
+        # Update the weighted sum and retained edges count
         weighted_sum[i] += kept_values.sum(dtype=np.float64)
         weighted_sum[js] += kept_values
         retained_edges += js.size
 
+        # If requested, store the kept values and their indices for graph reconstruction
         if build_graph:
             js = js.astype(np.int32, copy=False)
             i_values = np.full(js.size, i, dtype=np.int32)
@@ -114,6 +121,7 @@ def compute_thresholded_degree(upper_rows, threshold, n_parcels, build_graph=Fal
             dtype=np.float32,
         ).tocsr()
 
+    # Return the final weighted degree vector, the number of retained edges, and the optional graph
     weighted_degree = weighted_sum / (n_parcels - 1)
     return weighted_degree, retained_edges, graph
 
