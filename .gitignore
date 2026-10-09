@@ -8,4 +8,7 @@ parcellation-test.tar
 data/
 export/
 AGENTS.md
-.csv_source_oasis/
+/csv_source_oasis/
+/.codex/
+/graphify-out/
+/logs/
