@@ -8,3 +8,31 @@ The quickest route is the **original NBS v1.2 MATLAB GUI** from [NITRC](https://
 4. **Run a small input check first**—say 100 permutations—then a final run with several thousand. The toolbox’s t-test is **one-sided**, so run both contrast signs if you want both directions and account for testing both. Its corrected *p*-value belongs to the **connected edge component**, not to each edge individually. [NBS manual](https://www.nitrc.org/frs/download.php/5331/Reference_Manual_NBS_v1.2.pdf)
 
 **Your immediate missing input is the subject-level 944 × 944 matrices for the new atlas.** The atlas exists, but the current notebook uses older-atlas weighted degrees. For 267 subjects, the double-precision matrix stack alone is about **1.9 GB**, before MATLAB and NBS working memory; the small pilot should establish runtime and peak RAM before the full permutation run.
+
+## Prepare the matrices from the test split
+
+```bash
+python scripts/graph_building/prepare_subject_similarity_matrices.py --method was --sim-formula 1 --dry-run
+python scripts/graph_building/prepare_subject_similarity_matrices.py --method was --sim-formula 1
+```
+
+This uses `test_healthy` and `test_unhealthy` from `data/splits.json`, keeping
+subjects with a local `data/warps/sub-XXXX/Reg_/_SyN1Warp.nii.gz`. Currently
+that gives 137 healthy and 130 unhealthy subjects. The voxel-built atlas at
+`outputs/atlases/atlas-1000-nocsf-from-voxels/rois` supplies the parcel order;
+the 56 parcels with fewer than 15 voxels are excluded before extraction.
+
+The script reuses the 15-point quantile representation and Wasserstein
+similarity calculation from `wasserstein_distance_graph2.py`. Formula 1 is
+`exp(-W)`; for formula 2 (`1/(1+W)`), also choose a separate `--output` path.
+Log-Jacobians are computed from the forward warps with ANTs (non-geometric
+mode) and cached under the output directory for reuse. Processing is serial
+with one ANTs thread. The double-precision stack needs 1.77 GiB; allow about
+4.5 GiB for the stack, MAT export and image buffers.
+
+The default output is `outputs/nbs/similarities_was_expW.mat`, containing only
+`similarity_matrices`, shaped `944 × 944 × 267`. Its `.subjects.txt` sidecar
+lists subjects in slice order, and its `.json` sidecar records that order,
+group indicators (healthy 0, unhealthy 1), retained and excluded parcels,
+and calculation settings. Build the step-2 design matrix in this exact
+subject order. Similarities are unthresholded, symmetric, with diagonal 1.
