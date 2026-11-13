@@ -30,8 +30,7 @@
 # non-definitive; re-run with was,kl,meiq once the KL similarity
 # transform is fixed, before drawing any conclusions.
 
-# Legacy 15-voxel/count-manifest workflow; for connected atlases, see
-# docs/SUPPORTED_WORKFLOW.md.
+# Use a validated connected atlas; see docs/SUPPORTED_WORKFLOW.md.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -52,8 +51,9 @@ RUN_MANIFEST="$OUTPUT_ROOT/run_manifest_${RUN_ID}.json"
 
 echo "=== run-id=$RUN_ID  started $(date +"%d-%m-%Y %H:%M") ==="
 
-echo "--- [1/6] Checking ROI completeness ---"
-python scripts/validation/check_roi_counts.py --rois-dir "$ROIS_DIR"
+echo "--- [1/6] Verifying connected atlas ---"
+python scripts/parcellation/export_masked_jacobian_vectors.py \
+  --rois-dir "$ROIS_DIR" --verify-atlas-only
 
 echo "--- [2/6] Preflighting subject cohort ---"
 python scripts/validation/validate_batch_inputs.py \

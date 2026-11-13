@@ -1,6 +1,8 @@
 """Synthetic regression checks for pipeline input identities."""
 import argparse
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -40,6 +42,27 @@ class IntegrityRegressionTest(unittest.TestCase):
             'validation_status': 'passed', 'labels_processed_sequentially': True, 'labels': rows}))
         return argparse.Namespace(roi_manifest=None, rois_dir=self.root, allow_unvalidated_rois=False,
                                   label=None, n_parcels=None, sample_mode='first', seed=0)
+
+    def test_pipeline_preflight_preserves_connected_atlas(self):
+        self.atlas()
+        manifest = self.root / 'atlas_manifest.json'
+        original = manifest.read_bytes()
+        script = (ROOT / 'scripts/pipelines/run_full_pipeline.sh').read_text()
+        project_line = next(line for line in script.splitlines() if line.startswith('PROJECT_ROOT='))
+        script = script.replace(project_line, f'PROJECT_ROOT="{ROOT}"')
+        script = script.replace('ROIS_DIR="outputs/rois"', f'ROIS_DIR="{self.root}"')
+        runner = self.root / 'pipeline.sh'
+        runner.write_text(script)
+        bin_dir = self.root / 'bin'
+        bin_dir.mkdir()
+        python = bin_dir / 'python'
+        python.write_text(f'#!/bin/sh\ncase "$1" in *export_masked_jacobian_vectors.py) exec "{sys.executable}" "$@";; *) exit 42;; esac\n')
+        python.chmod(0o755)
+        result = subprocess.run(['bash', str(runner)], cwd=ROOT, capture_output=True, text=True,
+                                env={**os.environ, 'PATH': f"{bin_dir}:{os.environ['PATH']}"})
+        self.assertEqual(result.returncode, 42, result.stdout + result.stderr)
+        self.assertIn('Validated atlas: 2 parcels', result.stdout)
+        self.assertEqual(manifest.read_bytes(), original)
 
     def test_modified_mask_rejected(self):
         args = self.atlas()

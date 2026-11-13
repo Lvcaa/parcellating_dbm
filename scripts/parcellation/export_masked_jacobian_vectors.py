@@ -185,6 +185,11 @@ def parse_args() -> argparse.Namespace:
         help="Allow extraction without an atlas manifest (diagnostic use only).",
     )
     parser.add_argument(
+        "--verify-atlas-only",
+        action="store_true",
+        help="Verify the selected atlas masks and exit without exporting Jacobians.",
+    )
+    parser.add_argument(
         "--force",
         action="store_true",
         help="Rewrite every expected vector even if a matching completion manifest exists.",
@@ -597,6 +602,9 @@ def main() -> None:
 
     parcel_ids = parcel_ids_for_exports(label_exports)
     atlas, atlas_manifest_hash = load_atlas_contract(args, parcel_ids)
+    if args.verify_atlas_only:
+        print(f"Validated atlas: {len(parcel_ids)} parcels", flush=True)
+        return
 
     if args.label is not None:
         label_name = LABEL_NAMES.get(args.label, "Unknown label")

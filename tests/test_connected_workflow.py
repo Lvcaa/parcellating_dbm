@@ -106,6 +106,29 @@ class ConnectedWorkflowTest(unittest.TestCase):
         self.assertEqual(report["subject_count"], 2)
         self.assertFalse(report["definitive"])
 
+        # Actual subset exports and their graphs must not pass as a full atlas.
+        for subject in subjects:
+            jacobian = root / f"{subject}_to_template_logJacobian.nii.gz"
+            self.run_script(
+                "scripts/parcellation/export_masked_jacobian_vectors.py",
+                "--jacobian", jacobian, "--rois-dir", atlas, "--n-parcels", 2,
+                "--output-dir", run / "jacobian_parcel_vectors", "--num-workers", 1,
+            )
+            for formula, name in [(1, "expW"), (2, "inv1pW")]:
+                self.run_script(
+                    "scripts/graph_building/wasserstein_distance_graph2.py",
+                    "--input-folder", run / "jacobian_parcel_vectors" / subject,
+                    "--output-folder", run / f"wasserstein_graphs_{name}" / subject,
+                    "--method", "was", "--sim-formula", formula, "--num-workers", 1,
+                )
+        result = self.run_script(
+            "scripts/validation/validate_cohort_outputs.py",
+            "--run-root", run, "--subjects", subject_list, "--database", database,
+            "--manifest", run / "run_manifest.json", "--methods", "was",
+            "--expected-healthy", 1, "--expected-unhealthy", 1, succeeds=False,
+        )
+        self.assertIn("requires a full atlas export", result.stderr)
+
         # A changed connected manifest must invalidate the frozen run.
         atlas_record["parcel_count"] += 1
         atlas_manifest.write_text(json.dumps(atlas_record))

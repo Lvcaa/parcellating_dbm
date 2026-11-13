@@ -112,6 +112,9 @@ while IFS= read -r subject || [ -n "$subject" ]; do
 done < "$SUBJECTS"
 ```
 
+The exporter accepts `--verify-atlas-only` to validate the connected manifest
+and its masks without reading a Jacobian or changing the atlas.
+
 Parcel export writes one concatenated float32 vector file, int64 offsets,
 explicit parcel order, float64 direct mean/median features, and completion
 metadata. Weighted degree is the sum of off-diagonal similarities divided by
@@ -148,6 +151,9 @@ for feature in direct_mean direct_median weighted_degree_expW weighted_degree_in
     --expected-healthy "$HEALTHY_COUNT" --expected-unhealthy "$UNHEALTHY_COUNT"
 done
 ```
+
+Cohort validation requires a full-atlas export; explicitly selected label or
+parcel subsets are not accepted for cohort validation.
 
 The validator checks expected subject folders, counts, completion metadata,
 atlas/order agreement, feature sizes, and finite values. Passing these checks

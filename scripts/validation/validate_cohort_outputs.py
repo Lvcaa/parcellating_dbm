@@ -127,6 +127,12 @@ def main() -> None:
                 f"extras={sorted(discovered-expected_set)}"
             )
 
+    atlas_counts = {}
+    for path, identity in run_manifest.get("atlas_manifest", {}).items():
+        atlas = read_json(Path(path))
+        if atlas.get("schema_version") == 2 and atlas.get("validation_status") == "passed":
+            atlas_counts[identity] = atlas.get("parcel_count")
+
     reference_order_hash = None
     reference_atlas_hash = None
     parcel_count = None
@@ -139,9 +145,15 @@ def main() -> None:
             path = vector_root / subject / filename
             if not vector_completion.get(key) or not path.is_file() or sha256_file(path) != vector_completion[key]:
                 raise ValueError(f"Parcel vector hash mismatch: {path}")
+        selection = vector_completion.get("selection")
+        if (not isinstance(selection, dict) or "label" not in selection or "n_parcels" not in selection
+                or selection["label"] is not None or selection["n_parcels"] is not None):
+            raise ValueError(f"Cohort validation requires a full atlas export: {subject}")
         n = int(vector_completion["parcel_count"])
         order_hash = vector_completion["parcel_order_sha256"]
         atlas_hash = vector_completion["atlas_id"]
+        if atlas_counts.get(atlas_hash) != n:
+            raise ValueError(f"Parcel count differs from frozen full atlas: {subject}")
         if parcel_count is None:
             parcel_count, reference_order_hash, reference_atlas_hash = n, order_hash, atlas_hash
         if (n, order_hash, atlas_hash) != (parcel_count, reference_order_hash, reference_atlas_hash):
