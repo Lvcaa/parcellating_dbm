@@ -1,5 +1,11 @@
 # Parcellating DBM
 
+For the supported connected-atlas commands, external inputs, validation checks,
+and current scientific limitations, start with
+[the supported workflow](docs/SUPPORTED_WORKFLOW.md). The older walkthrough
+below contains historical commands and cohort settings and is retained as
+background; use the supported guide when reproducing this branch.
+
 Research code for parcel-level deformation-based morphometry (DBM).
 
 The repository turns nonlinear-registration Jacobian images into subject-level
@@ -9,15 +15,72 @@ brain graphs:
 2. Register a subject T1 image to an MNI template with ANTs.
 3. Extract the Jacobian values inside every parcel.
 4. Compare parcel distributions with Wasserstein distance.
-5. Build dense similarity graphs and compute parcel-level weighted degree.
-6. Compare graph features across subjects to look for localized morphometric
-   disruptions.
+5. Compute parcel-level Wasserstein weighted degree without retaining dense
+   adjacency matrices.
+6. Compare graph centrality and direct parcel log-Jacobian summaries across
+   subjects.
 
 The project is actively evolving. The current implemented graph path focuses on
 Wasserstein similarity. The planned analysis also includes Gaussian KL
 divergence and robust median/IQR comparisons; see
 [`ProjectDescription.md`](ProjectDescription.md) and [`PROGRESS.md`](PROGRESS.md)
 for the research plan and current status.
+
+## Corrected validated workflow
+
+Legacy outputs are provisional. Definitive runs use a versioned run directory,
+a bilateral 6-connected atlas manifest, atomic stage-completion markers, and an
+exact 137 Healthy/130 Unhealthy subject manifest.
+
+Build and freeze the atlas on the external cluster (label 42 is mandatory):
+
+```bash
+python scripts/parcellation/build_connected_atlas.py \
+  --segmentation /path/to/MNI152_T1_1mm_seg.nii.gz \
+  --output-root /path/to/corrected_rois \
+  --parcel-size 15
+```
+
+Before the full batch, compare the two ANTs relative log-Jacobian conventions
+for one forward subject-to-MNI warp in temporary storage:
+
+```bash
+python scripts/validation/compare_jacobian_modes.py \
+  --warp data/warps/sub-0002/Reg_/_SyN1Warp.nii.gz \
+  --output-dir /tmp/jacobian_mode_check
+```
+
+After reviewing that comparison, launch a versioned batch. Both similarity
+formulas are built when `--sim-formula` is omitted:
+
+```bash
+bash scripts/run_batch_pipeline.sh data/test_cohort_warps_available.txt \
+  --run-id corrected_bilateral_v1 \
+  --rois-dir /path/to/corrected_rois \
+  --jacobian-geometric false \
+  --num-workers 8
+```
+
+The batch preflight requires 267 unique subjects, the expected group balance,
+and all source warps before any computation. Code, atlas, and subject-list
+hashes are frozen for the run. Every subject stores parcel order and direct mean
+and median log-Jacobian vectors alongside both weighted-degree endpoints.
+
+Validate all outputs before inference:
+
+```bash
+python scripts/validation/validate_cohort_outputs.py \
+  --run-root outputs/runs/corrected_bilateral_v1 \
+  --subjects data/test_cohort_warps_available.txt \
+  --database data/database_finale_labels_corrette.csv
+```
+
+Then set `RUN_ID` in
+[`scripts/analysis/t_tests.ipynb`](scripts/analysis/t_tests.ipynb), or run one
+endpoint from the command line with
+[`scripts/analysis/parcel_statistics.py`](scripts/analysis/parcel_statistics.py).
+The analysis reports Welch/BH-FDR results, confidence intervals, Hedges' g,
+age/sex/education-adjusted models, and leave-one-subject-out sensitivity.
 
 ## Repository Structure
 
@@ -64,25 +127,25 @@ python scripts/preprocessing/inspect_labels.py
 
 ### 2. Generate parcel masks
 
-[`scripts/parcellation/sub_parcels_equal_size.py`](scripts/parcellation/sub_parcels_equal_size.py)
-splits one anatomical ROI into approximately equal-sized parcels. It uses
-spatially constrained agglomerative clustering and writes binary NIfTI masks:
+[`scripts/parcellation/separate_cases/second_roi_test.py`](scripts/parcellation/separate_cases/second_roi_test.py)
+builds the retained labels sequentially with 6-connected graph coarsening.
+Within each label it writes masks with 75% of the detected CPUs. The safe
+default output is isolated from the current atlas:
 
 ```text
-outputs/rois/<label>/roi_XXXX.nii.gz
+outputs/test_parcellation/rois/<label>/roi_XXXX.nii.gz
 ```
 
-Example:
+Validate every label without writing files, then run the complete build:
 
 ```bash
-python scripts/parcellation/sub_parcels_equal_size.py \
-  --roi-label 10 \
-  --parcel-size 15 \
-  --skip-neighbor-check
+python scripts/parcellation/separate_cases/second_roi_test.py --validate-only
+python scripts/parcellation/separate_cases/second_roi_test.py
 ```
 
-The algorithm can allocate a large distance matrix for high-volume labels.
-Test smaller ROIs first and use the cluster recipes for memory-heavy runs.
+The legacy `sub_parcels_equal_size.py` implementation must not be used for
+atlas regeneration: its global balancing assignment can disconnect parcels
+and its dense distance matrix is infeasible for the largest labels.
 
 Useful companion scripts:
 
@@ -134,23 +197,25 @@ python scripts/parcellation/export_masked_jacobian_vectors.py \
 Use `--input-dir` to batch-process a directory of Jacobian images, or `--label`
 and `--n-parcels` for a smaller test run.
 
-### 5. Build dense Wasserstein graphs
+### 5. Build Wasserstein weighted-degree graphs
 
 [`scripts/graph_building/wasserstein_distance_graph2.py`](scripts/graph_building/wasserstein_distance_graph2.py)
 is the active optimized graph builder. It projects sorted parcel vectors onto a
-common quantile grid, computes a dense pairwise Wasserstein matrix in blocks,
-and saves the graph as memory-mapped arrays.
+common quantile grid and computes pairwise Wasserstein similarities in blocks.
+Only the normalized weighted-degree vector is retained.
 
 Choose the distance-to-similarity transform explicitly:
 
 ```bash
 python scripts/graph_building/wasserstein_distance_graph2.py \
   --subject-id sub-0091 \
+  --method was \
   --sim-formula 1 \
   --num-workers 8
 
 python scripts/graph_building/wasserstein_distance_graph2.py \
   --subject-id sub-0091 \
+  --method was \
   --sim-formula 2 \
   --num-workers 8
 ```
@@ -164,13 +229,13 @@ outputs/wasserstein_graphs_expW/<subject-id>/
 outputs/wasserstein_graphs_inv1pW/<subject-id>/
 ```
 
-Each graph folder contains:
+Each validated graph folder contains:
 
 ```text
-adjacency_matrix.dat    # Dense float32 memory-mapped similarity matrix
 weighted_degree.dat     # Float64 weighted-degree vector
-metadata.npy            # Number of parcels
+metadata.json           # Formula, normalization, and atlas contract
 parcel_order.txt        # Row/column order for interpreting graph arrays
+complete.json           # Atomic stage-completion contract
 ```
 
 ### 6. Compare subjects
@@ -194,11 +259,13 @@ Once parcel masks exist, the main shell wrapper runs registration, vector
 export, and both Wasserstein graph variants:
 
 ```bash
-bash scripts/run_jacobian_wasserstein_pipeline.sh \
-  data/reference/sub-0091_ses-V01_T1w.nii.gz
+bash scripts/run_jacobian_wasserstein_pipeline.sh sub-0091 \
+  --run-root outputs/runs/example \
+  --rois-dir /path/to/corrected_rois
 ```
 
-Existing log-Jacobian images and parcel vectors are reused automatically.
+Outputs are reused only when their source, atlas, parcel-order, configuration,
+and atomic completion markers match.
 
 ## Script Guide
 
@@ -212,17 +279,18 @@ Existing log-Jacobian images and parcel vectors are reused automatically.
 
 ### Parcellation
 
-- `sub_parcels_equal_size.py`: primary ROI splitting implementation.
+- `separate_cases/second_roi_test.py`: active connected atlas builder; labels
+  run sequentially and masks within a label are written in parallel.
+- `sub_parcels_equal_size.py`: legacy implementation retained only for
+  provenance; do not use for atlas regeneration.
 - `aggregate_parcels.py`: recombines parcel masks for coverage checks.
 - `assign_unique_labels.py`: assigns globally unique parcel filenames and
   creates the label lookup CSV.
 - `export_masked_jacobian_vectors.py`: extracts reusable per-parcel Jacobian
   vectors.
-- `separate_cases/second_roi_test.py`: experimental connected-region-growing
-  implementation for difficult ROIs.
 - `separate_cases/run_allowed_parcellations.py` and
-  `separate_cases/run_high_ram_labels.py`: intended batch runners for standard
-  and high-memory labels.
+  `separate_cases/run_high_ram_labels.py`: legacy wrappers; the active builder
+  now handles every retained label itself.
 
 ### Graph Building
 

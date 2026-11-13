@@ -1,0 +1,154 @@
+"""Low-cost synthetic checks for pipeline arithmetic and atomic outputs."""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+import nibabel as nib
+import numpy as np
+from scipy.stats import wasserstein_distance
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "graph_building"))
+sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "parcellation"))
+sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "parcellation" / "separate_cases"))
+
+from export_masked_jacobian_vectors import extract_vectors, write_direct_summaries
+from pipeline_integrity import atomic_save_npy
+from second_parcellation_method import connected_subcomponents, grow_component, parcel_targets
+from wasserstein_distance_graph2 import (
+    SIM_FORMULA_EXP,
+    SIM_FORMULA_INV1PW,
+    _compute_block,
+)
+
+
+class GraphArithmeticTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.samples = np.array(
+            [
+                [-1.0, 0.0, 1.0, 2.0],
+                [0.0, 1.0, 2.0, 3.0],
+                [-2.0, -1.0, 0.0, 1.0],
+            ],
+            dtype=np.float32,
+        )
+        self.distances = np.array(
+            [
+                [wasserstein_distance(left, right) for right in self.samples]
+                for left in self.samples
+            ]
+        )
+
+    def test_exact_w1_and_both_similarity_formulas(self) -> None:
+        _, _, exp_similarity = _compute_block(
+            0, len(self.samples), self.samples, SIM_FORMULA_EXP
+        )
+        _, _, inv_similarity = _compute_block(
+            0, len(self.samples), self.samples, SIM_FORMULA_INV1PW
+        )
+        np.testing.assert_allclose(exp_similarity, np.exp(-self.distances), rtol=1e-6)
+        np.testing.assert_allclose(
+            inv_similarity, 1.0 / (1.0 + self.distances), rtol=1e-6
+        )
+
+    def test_weighted_degree_excludes_self_and_uses_n_minus_one(self) -> None:
+        _, _, similarity = _compute_block(
+            0, len(self.samples), self.samples, SIM_FORMULA_EXP
+        )
+        observed = (similarity.sum(axis=1, dtype=np.float64) - 1.0) / (
+            len(self.samples) - 1
+        )
+        expected = np.array(
+            [
+                np.delete(similarity[row], row).mean(dtype=np.float64)
+                for row in range(len(self.samples))
+            ]
+        )
+        np.testing.assert_allclose(observed, expected, rtol=1e-12, atol=1e-12)
+
+
+class ConnectedParcellationTest(unittest.TestCase):
+    def test_targets_and_six_connectivity(self) -> None:
+        coordinates = np.argwhere(np.ones((4, 4, 3), dtype=bool))
+        targets = parcel_targets(len(coordinates), 4)
+        owners = grow_component(coordinates, len(targets))
+        observed = np.bincount(owners, minlength=len(targets))
+        np.testing.assert_array_equal(observed, targets)
+        for parcel_id in range(len(targets)):
+            self.assertEqual(connected_subcomponents(coordinates[owners == parcel_id]), 1)
+
+    def test_narrow_neck_is_deterministic_connected_and_bounded(self) -> None:
+        mask = np.zeros((12, 12, 3), dtype=bool)
+        mask[1:5, 1:5, 1] = True
+        mask[7:11, 7:11, 1] = True
+        mask[4:8, 4, 1] = True
+        mask[7, 4:8, 1] = True
+        coordinates = np.argwhere(mask)
+        n_parcels = int(np.ceil(len(coordinates) / 15))
+
+        first = grow_component(coordinates, n_parcels)
+        second = grow_component(coordinates, n_parcels)
+        np.testing.assert_array_equal(first, second)
+
+        sizes = np.bincount(first, minlength=n_parcels)
+        targets = parcel_targets(len(coordinates), n_parcels)
+        self.assertGreaterEqual(int(sizes.min()), max(1, int(targets.min()) - 4))
+        self.assertLessEqual(int(sizes.max()), int(targets.max()) + 3)
+        for parcel_id in range(n_parcels):
+            self.assertEqual(
+                connected_subcomponents(coordinates[first == parcel_id]), 1
+            )
+
+
+class ExtractionAndAtomicIoTest(unittest.TestCase):
+    def test_atomic_npy_and_masked_direct_summaries(self) -> None:
+        # Retain synthetic fixtures for inspection.
+        raw_tmp = tempfile.mkdtemp(prefix="dbm-smoke-")
+        root = Path(raw_tmp)
+        npy_path = root / "atomic.npy"
+        expected_array = np.array([1.0, 2.0], dtype=np.float32)
+        atomic_save_npy(npy_path, expected_array)
+        np.testing.assert_array_equal(np.load(npy_path), expected_array)
+
+        affine = np.eye(4)
+        jacobian_values = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
+        jacobian_path = root / "log_jacobian.nii.gz"
+        nib.save(nib.Nifti1Image(jacobian_values, affine), jacobian_path)
+
+        mask_paths = []
+        for parcel_number, coordinates in enumerate(
+            ([(0, 0, 0), (0, 0, 1)], [(1, 1, 0), (1, 1, 1)]), start=1
+        ):
+            mask = np.zeros((2, 2, 2), dtype=np.uint8)
+            for coordinate in coordinates:
+                mask[coordinate] = 1
+            path = root / f"roi_{parcel_number:04d}.nii.gz"
+            nib.save(nib.Nifti1Image(mask, affine), path)
+            mask_paths.append(path)
+
+        jacobian_img = nib.load(jacobian_path)
+        vectors = extract_vectors(
+            mask_paths, jacobian_img, jacobian_values, num_workers=1
+        )
+        subject_dir = root / "subject"
+        parcel_ids = ["label_42/roi_0001", "label_42/roi_0002"]
+        write_direct_summaries(subject_dir, vectors, parcel_ids)
+
+        np.testing.assert_allclose(
+            np.fromfile(subject_dir / "direct_mean.dat", dtype=np.float64),
+            [0.5, 6.5],
+        )
+        np.testing.assert_allclose(
+            np.fromfile(subject_dir / "direct_median.dat", dtype=np.float64),
+            [0.5, 6.5],
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

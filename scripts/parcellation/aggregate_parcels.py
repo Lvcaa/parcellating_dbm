@@ -1,5 +1,5 @@
 """
-Aggregate the ``roi_*.nii.gz`` masks in one folder into one NIfTI volume.
+Aggregate the ``roi_*.nii.gz`` masks in one folder into one NIfTI volume. aka for each voxel, count how many parcel masks overlap it. The output is a uint16 NIfTI image where each voxel value is the number of overlapping parcels.
 
 Usage:
     python scripts/parcellation/aggregate_parcels.py PARCELS_DIR OUTPUT_PATH [options]
@@ -23,6 +23,7 @@ import numpy as np
 
 
 def load_parcel_chunk(chunk_id, parcel_files, expected_shape, expected_affine):
+    """Sum the binary masks for a subset of parcel files; called in a worker process."""
     print(
         f"[worker {chunk_id}] Starting chunk with {len(parcel_files)} parcel files",
         flush=True,
@@ -50,6 +51,7 @@ def load_parcel_chunk(chunk_id, parcel_files, expected_shape, expected_affine):
 
 
 def chunk_files(parcel_files, n_chunks):
+    """Split parcel_files into at most n_chunks roughly equal sublists."""
     chunk_size = max(1, int(np.ceil(len(parcel_files) / n_chunks)))
     return [
         parcel_files[start_index : start_index + chunk_size]
@@ -58,6 +60,7 @@ def chunk_files(parcel_files, n_chunks):
 
 
 def aggregate_parcels(parcels_dir, output_path, workers=1):
+    """Count how many parcel masks overlap each voxel and write the result as uint16."""
     # Get a list of all parcel files in the directory
     parcel_files = sorted(glob(os.path.join(parcels_dir, "roi_*.nii.gz")))
 
@@ -92,6 +95,7 @@ def aggregate_parcels(parcels_dir, output_path, workers=1):
                 executor.submit(load_parcel_chunk, chunk_id, chunk, template_img.shape, affine)
                 for chunk_id, chunk in enumerate(file_chunks, start=1)
             ]
+            # futures are consumed sequentially so += is safe (no concurrent writes)
             for future_index, future in enumerate(futures, start=1):
                 aggregated_image += future.result()
                 print(
