@@ -24,7 +24,10 @@ def parse_args() -> argparse.Namespace:
 
 def atlas_manifest_identity(path: Path) -> str:
     """
-    Content-stable identity for the atlas manifest: its `atlas_id` field,
+    Identity for a connected manifest, or the legacy `atlas_id` field.
+
+    Connected manifests use their file hash, as in vector export. Legacy
+    count manifests use their `atlas_id` field,
     not a raw byte hash. check_roi_counts.py stamps a fresh run_date/run_time
     into atlas_manifest.json on every invocation, so hashing the whole file
     would report a "changed" atlas on every resume even when the underlying
@@ -32,9 +35,17 @@ def atlas_manifest_identity(path: Path) -> str:
     """
     manifest = read_json(path)
     atlas_id = manifest.get("atlas_id")
-    if not atlas_id:
-        raise ValueError(f"Atlas manifest missing atlas_id: {path}")
-    return atlas_id
+    if atlas_id:
+        return atlas_id
+    if (
+        manifest.get("schema_version") == 2
+        and manifest.get("validation_status") == "passed"
+        and manifest.get("labels_processed_sequentially") is True
+    ):
+        # The connected builder writes an immutable, hashed manifest without
+        # the legacy atlas_id field. Match the identity used by vector export.
+        return sha256_file(path)
+    raise ValueError(f"Atlas manifest missing a validated atlas identity: {path}")
 
 
 def current_payload(args: argparse.Namespace) -> dict:

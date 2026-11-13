@@ -30,6 +30,8 @@
 # non-definitive; re-run with was,kl,meiq once the KL similarity
 # transform is fixed, before drawing any conclusions.
 
+# Legacy 15-voxel/count-manifest workflow; for connected atlases, see
+# docs/SUPPORTED_WORKFLOW.md.
 set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

@@ -1,5 +1,11 @@
 # Parcellating DBM
 
+For the supported connected-atlas commands, external inputs, validation checks,
+and current scientific limitations, start with
+[the supported workflow](docs/SUPPORTED_WORKFLOW.md). The older walkthrough
+below contains historical commands and cohort settings and is retained as
+background; use the supported guide when reproducing this branch.
+
 Research code for parcel-level deformation-based morphometry (DBM).
 
 The repository turns nonlinear-registration Jacobian images into subject-level

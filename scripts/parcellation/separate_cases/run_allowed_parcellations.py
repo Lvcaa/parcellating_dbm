@@ -145,7 +145,7 @@ def run_sub_parcellations(
 ) -> None:
     # Use the connected region-growing implementation for every label. The
     # older balanced-clustering implementation can produce disconnected masks.
-    script = const.SCRIPTS_DIR / "parcellation" / "separate_cases" / "second_roi_test.py"
+    script = const.SCRIPTS_DIR / "parcellation" / "separate_cases" / "second_parcellation_method.py"
     for label in labels:
         print(f"Processing label {label} ({const.LABEL_DICT[label]})", flush=True)
         cmd = [

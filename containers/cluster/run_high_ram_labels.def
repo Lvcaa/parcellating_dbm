@@ -41,7 +41,7 @@ From: python:3.11-slim
     parcel_size="${HIGH_RAM_PARCEL_SIZE:-15}"
     aggregate_workers="${HIGH_RAM_AGGREGATE_WORKERS:-1}"
     max_estimated_distance_gb="${HIGH_RAM_MAX_ESTIMATED_DISTANCE_GB:-8}"
-    labels_file="${HIGH_RAM_LABELS_FILE:-/app/scripts/parcellation/high_memory_labels.txt}"
+    labels_file="${HIGH_RAM_LABELS_FILE:-/app/docs/high_memory_labels.txt}"
     ensure_dir_writable "${output_root}"
     ensure_dir_writable "${aggregated_output_root}"
 
@@ -63,7 +63,7 @@ From: python:3.11-slim
         exit 1
     fi
 
-    exec python /app/scripts/parcellation/run_high_ram_labels.py \
+    exec python /app/scripts/parcellation/separate_cases/run_high_ram_labels.py \
         --segmentation "${segmentation}" \
         --output-root "${output_root}" \
         --aggregated-output-root "${aggregated_output_root}" \

@@ -37,4 +37,4 @@ output_root=\"${RUN_ALLOWED_OUTPUT_ROOT:-${workdir}/outputs/rois}\"\n\
 aggregated_output_root=\"${RUN_ALLOWED_AGGREGATED_OUTPUT_ROOT:-${workdir}/outputs/aggregated_parcellations}\"\n\
 mkdir -p \"${output_root}\"\n\
 mkdir -p \"${aggregated_output_root}\"\n\
-exec python /app/scripts/parcellation/run_allowed_parcellations.py --segmentation \"${segmentation}\" --output-root \"${output_root}\" --aggregated-output-root \"${aggregated_output_root}\" \"$@\"", "--"]
+exec python /app/scripts/parcellation/separate_cases/run_allowed_parcellations.py --segmentation \"${segmentation}\" --output-root \"${output_root}\" --aggregated-output-root \"${aggregated_output_root}\" \"$@\"", "--"]

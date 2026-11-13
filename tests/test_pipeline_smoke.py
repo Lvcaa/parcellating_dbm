@@ -20,7 +20,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "scripts" / "parcellation" / "separate_cas
 
 from export_masked_jacobian_vectors import extract_vectors, write_direct_summaries
 from pipeline_integrity import atomic_save_npy
-from second_roi_test import connected_subcomponents, grow_component, parcel_targets
+from second_parcellation_method import connected_subcomponents, grow_component, parcel_targets
 from wasserstein_distance_graph2 import (
     SIM_FORMULA_EXP,
     SIM_FORMULA_INV1PW,
@@ -108,45 +108,46 @@ class ConnectedParcellationTest(unittest.TestCase):
 
 class ExtractionAndAtomicIoTest(unittest.TestCase):
     def test_atomic_npy_and_masked_direct_summaries(self) -> None:
-        with tempfile.TemporaryDirectory() as raw_tmp:
-            root = Path(raw_tmp)
-            npy_path = root / "atomic.npy"
-            expected_array = np.array([1.0, 2.0], dtype=np.float32)
-            atomic_save_npy(npy_path, expected_array)
-            np.testing.assert_array_equal(np.load(npy_path), expected_array)
+        # Retain synthetic fixtures for inspection.
+        raw_tmp = tempfile.mkdtemp(prefix="dbm-smoke-")
+        root = Path(raw_tmp)
+        npy_path = root / "atomic.npy"
+        expected_array = np.array([1.0, 2.0], dtype=np.float32)
+        atomic_save_npy(npy_path, expected_array)
+        np.testing.assert_array_equal(np.load(npy_path), expected_array)
 
-            affine = np.eye(4)
-            jacobian_values = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
-            jacobian_path = root / "log_jacobian.nii.gz"
-            nib.save(nib.Nifti1Image(jacobian_values, affine), jacobian_path)
+        affine = np.eye(4)
+        jacobian_values = np.arange(8, dtype=np.float32).reshape(2, 2, 2)
+        jacobian_path = root / "log_jacobian.nii.gz"
+        nib.save(nib.Nifti1Image(jacobian_values, affine), jacobian_path)
 
-            mask_paths = []
-            for parcel_number, coordinates in enumerate(
-                ([(0, 0, 0), (0, 0, 1)], [(1, 1, 0), (1, 1, 1)]), start=1
-            ):
-                mask = np.zeros((2, 2, 2), dtype=np.uint8)
-                for coordinate in coordinates:
-                    mask[coordinate] = 1
-                path = root / f"roi_{parcel_number:04d}.nii.gz"
-                nib.save(nib.Nifti1Image(mask, affine), path)
-                mask_paths.append(path)
+        mask_paths = []
+        for parcel_number, coordinates in enumerate(
+            ([(0, 0, 0), (0, 0, 1)], [(1, 1, 0), (1, 1, 1)]), start=1
+        ):
+            mask = np.zeros((2, 2, 2), dtype=np.uint8)
+            for coordinate in coordinates:
+                mask[coordinate] = 1
+            path = root / f"roi_{parcel_number:04d}.nii.gz"
+            nib.save(nib.Nifti1Image(mask, affine), path)
+            mask_paths.append(path)
 
-            jacobian_img = nib.load(jacobian_path)
-            vectors = extract_vectors(
-                mask_paths, jacobian_img, jacobian_values, num_workers=1
-            )
-            subject_dir = root / "subject"
-            parcel_ids = ["label_42/roi_0001", "label_42/roi_0002"]
-            write_direct_summaries(subject_dir, vectors, parcel_ids)
+        jacobian_img = nib.load(jacobian_path)
+        vectors = extract_vectors(
+            mask_paths, jacobian_img, jacobian_values, num_workers=1
+        )
+        subject_dir = root / "subject"
+        parcel_ids = ["label_42/roi_0001", "label_42/roi_0002"]
+        write_direct_summaries(subject_dir, vectors, parcel_ids)
 
-            np.testing.assert_allclose(
-                np.fromfile(subject_dir / "direct_mean.dat", dtype=np.float64),
-                [0.5, 6.5],
-            )
-            np.testing.assert_allclose(
-                np.fromfile(subject_dir / "direct_median.dat", dtype=np.float64),
-                [0.5, 6.5],
-            )
+        np.testing.assert_allclose(
+            np.fromfile(subject_dir / "direct_mean.dat", dtype=np.float64),
+            [0.5, 6.5],
+        )
+        np.testing.assert_allclose(
+            np.fromfile(subject_dir / "direct_median.dat", dtype=np.float64),
+            [0.5, 6.5],
+        )
 
 
 if __name__ == "__main__":
