@@ -23,6 +23,7 @@ from pipeline_integrity import (
     atomic_write_text,
     load_completion,
     sha256_lines,
+    sha256_file,
     validate_raw_vector,
     write_completion,
 )
@@ -368,6 +369,10 @@ def read_input_contract(subject_folder: Path, parcel_ids: list[str]) -> dict:
         raise ValueError(f"Parcel-order count differs from completion manifest: {subject_folder}")
     if sha256_lines(parcel_ids) != completion.get("parcel_order_sha256"):
         raise ValueError(f"Parcel-order hash differs from completion manifest: {subject_folder}")
+    for filename, key in (("parcel_vectors.dat", "vector_data_sha256"),
+                          ("parcel_offsets.dat", "vector_offsets_sha256")):
+        if not completion.get(key) or completion[key] != sha256_file(subject_folder / filename):
+            raise ValueError(f"Parcel vector hash mismatch: {subject_folder / filename}")
     return completion
 
 
@@ -385,6 +390,8 @@ def graph_contract(
         "subject_id": subject_id,
         "parcel_count": n_parcels,
         "parcel_order_sha256": parcel_order_hash,
+        "vector_data_sha256": input_completion["vector_data_sha256"],
+        "vector_offsets_sha256": input_completion["vector_offsets_sha256"],
         "atlas_id": input_completion.get("atlas_id"),
         "atlas_manifest_sha256": input_completion.get("atlas_manifest_sha256"),
         "method": method,

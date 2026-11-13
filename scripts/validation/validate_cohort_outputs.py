@@ -9,7 +9,8 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pipeline_integrity import atomic_write_json, load_completion, read_json, validate_raw_vector
+from pipeline_integrity import atomic_write_json, load_completion, read_json, sha256_file, validate_raw_vector
+from freeze_pipeline import atlas_manifest_identity
 
 
 # Mirrors METHOD_OUTPUT_PREFIX / SIM_FORMULA_OUTPUT_NAMES in
@@ -79,6 +80,16 @@ def main() -> None:
     if not run_manifest_path.is_file():
         raise ValueError(f"Frozen run manifest missing: {run_manifest_path}")
     run_manifest = read_json(run_manifest_path)
+    frozen_files = run_manifest.get("files", {})
+    for supplied in (args.subjects, args.database):
+        if str(supplied.resolve()) not in frozen_files:
+            raise ValueError(f"Supplied input was not frozen: {supplied}")
+    for path, digest in frozen_files.items():
+        if not Path(path).is_file() or sha256_file(Path(path)) != digest:
+            raise ValueError(f"Frozen input changed or missing: {path}")
+    for path, identity in run_manifest.get("atlas_manifest", {}).items():
+        if not Path(path).is_file() or atlas_manifest_identity(Path(path)) != identity:
+            raise ValueError(f"Frozen atlas manifest changed or missing: {path}")
     configuration = run_manifest.get("configuration", {})
     if configuration.get("sim_formula") != "both":
         raise ValueError("Cohort validation requires both similarity formulas")
@@ -123,6 +134,11 @@ def main() -> None:
         vector_completion = load_completion(vector_root / subject)
         if vector_completion is None or vector_completion.get("stage") != "parcel_vectors":
             raise ValueError(f"Incomplete parcel vectors: {subject}")
+        for filename, key in (("parcel_vectors.dat", "vector_data_sha256"),
+                              ("parcel_offsets.dat", "vector_offsets_sha256")):
+            path = vector_root / subject / filename
+            if not vector_completion.get(key) or not path.is_file() or sha256_file(path) != vector_completion[key]:
+                raise ValueError(f"Parcel vector hash mismatch: {path}")
         n = int(vector_completion["parcel_count"])
         order_hash = vector_completion["parcel_order_sha256"]
         atlas_hash = vector_completion["atlas_id"]
@@ -137,6 +153,9 @@ def main() -> None:
             completion = load_completion(root / subject)
             if completion is None or completion.get("stage") != "wasserstein_graph":
                 raise ValueError(f"Incomplete {label} graph: {subject}")
+            if any(completion.get(key) != vector_completion[key] for key in
+                   ("vector_data_sha256", "vector_offsets_sha256")):
+                raise ValueError(f"Graph input differs: {label}/{subject}")
             if completion.get("method") != method:
                 raise ValueError(f"Wrong method in {label}/{subject}")
             if completion.get("sim_formula") != expected_formula:

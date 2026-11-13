@@ -71,6 +71,7 @@ python scripts/validation/freeze_pipeline.py "$FREEZE_MODE" \
   --run-id "$RUN_ID" \
   --atlas-manifest "$ROIS_DIR/atlas_manifest.json" \
   --subject-list "$SUBJECTS_FILE" \
+  --file "$DATABASE" \
   --config sim_formula=both \
   --config method="$METHODS"
 

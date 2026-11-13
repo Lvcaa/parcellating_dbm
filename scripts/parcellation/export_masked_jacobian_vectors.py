@@ -368,6 +368,8 @@ def load_atlas_contract(args: argparse.Namespace, parcel_ids: list[str]) -> tupl
             "Re-run scripts/validation/check_roi_counts.py."
         )
     manifest_hash = sha256_file(manifest_path)
+    if not connected_valid:
+        raise ValueError("Count-only atlas manifests cannot verify mask identity; use a validated connected atlas")
     if connected_valid:
         expected_counts: dict[int, int] = {}
         for parcel_id in parcel_ids:
@@ -378,6 +380,8 @@ def load_atlas_contract(args: argparse.Namespace, parcel_ids: list[str]) -> tupl
             label: int(row["parcel_count"])
             for label, row in manifest_rows.items()
         }
+        if args.label is None and set(expected_counts) != set(manifest_counts):
+            raise ValueError("Selected labels do not match the complete validated atlas")
         mismatches = {
             label: (count, manifest_counts.get(label))
             for label, count in expected_counts.items()
@@ -405,7 +409,26 @@ def load_atlas_contract(args: argparse.Namespace, parcel_ids: list[str]) -> tupl
                 or int(label_manifest.get("parcel_count", -1)) != manifest_counts[label]
             ):
                 raise ValueError(f"Invalid label manifest: {label_manifest_path}")
+            records = label_manifest.get("parcels", [])
+            records_by_name = {record["file"]: record for record in records}
+            if len(records_by_name) != manifest_counts[label] or len(records) != len(records_by_name):
+                raise ValueError(f"Invalid parcel records: {label_manifest_path}")
+            selected = [parcel_id.split("/", 1)[1] + ".nii.gz" for parcel_id in parcel_ids
+                        if parcel_id.startswith(f"label_{label}/")]
+            if args.n_parcels is None and set(selected) != set(records_by_name):
+                raise ValueError(f"Parcel files differ from label manifest: {label_manifest_path}")
+            for name in selected:
+                if name not in records_by_name:
+                    raise ValueError(f"Unrecorded mask: {name}")
+                mask_path = args.rois_dir / str(label) / name
+                record = records_by_name[name]
+                if not mask_path.is_file() or sha256_file(mask_path) != record.get("sha256"):
+                    raise ValueError(f"Mask hash mismatch: {mask_path}")
+                if int(np.count_nonzero(nib.load(str(mask_path)).get_fdata())) != record.get("voxel_count"):
+                    raise ValueError(f"Mask voxel count mismatch: {mask_path}")
 
+        atlas["selection"] = {"label": args.label, "n_parcels": args.n_parcels,
+                              "sample_mode": args.sample_mode, "seed": args.seed}
         atlas.setdefault("atlas_id", manifest_hash)
     return atlas, manifest_hash
 
@@ -415,9 +438,12 @@ def subject_is_complete(
     source_signature: dict,
     atlas_manifest_hash: str,
     parcel_ids: list[str],
+    selection: dict | None,
 ) -> bool:
     completion = load_completion(subject_dir)
     if completion is None or completion.get("stage") != "parcel_vectors":
+        return False
+    if completion.get("selection") != selection:
         return False
     if completion.get("atlas_manifest_sha256") != atlas_manifest_hash:
         return False
@@ -436,6 +462,10 @@ def subject_is_complete(
         expected_bytes = int(offsets[-1]) * np.dtype(VECTOR_DTYPE).itemsize
         if (subject_dir / VECTOR_DATA_FILENAME).stat().st_size != expected_bytes:
             return False
+        for filename, key in ((VECTOR_DATA_FILENAME, "vector_data_sha256"),
+                              (VECTOR_OFFSETS_FILENAME, "vector_offsets_sha256")):
+            if completion.get(key) != sha256_file(subject_dir / filename):
+                return False
     except (OSError, ValueError):
         return False
     return True
@@ -466,7 +496,7 @@ def export_subject(
     parcel_ids = parcel_ids_for_exports(label_exports)
     source_signature = file_signature(jacobian_path)
     if not force and subject_is_complete(
-        subject_dir, source_signature, atlas_manifest_hash, parcel_ids
+        subject_dir, source_signature, atlas_manifest_hash, parcel_ids, atlas.get("selection")
     ):
         print(f"Validated parcel-vector output already complete: {subject_dir}", flush=True)
         return
@@ -508,6 +538,9 @@ def export_subject(
         "direct_summary_dtype": "float64",
         "direct_mean_file": DIRECT_MEAN_FILENAME,
         "direct_median_file": DIRECT_MEDIAN_FILENAME,
+        "selection": atlas.get("selection"),
+        "vector_data_sha256": sha256_file(subject_dir / VECTOR_DATA_FILENAME),
+        "vector_offsets_sha256": sha256_file(subject_dir / VECTOR_OFFSETS_FILENAME),
         "vector_data_file": VECTOR_DATA_FILENAME,
         "vector_offsets_file": VECTOR_OFFSETS_FILENAME,
         "vector_dtype": VECTOR_DTYPE,
